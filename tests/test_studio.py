@@ -214,3 +214,55 @@ def test_routes(engine, tmp_path, monkeypatch):
     assert client.delete(f'/api/recordings/{rec["id"]}').status_code == 200
     assert client.get(rec['audio_url']).status_code == 404
     assert client.post('/api/generate', data='x').status_code == 415
+
+
+# ---------- pronunciation ----------
+from studio.phonemes import HEBREW_PACK, US_VOCAB, fix_heteronyms, make_resolver, normalize_ipa, respell  # noqa: E402
+
+
+def fake_g2p(text):
+    table = {'yah': 'jˈɑ', 'hoo': 'hˈu', 'ah': 'ˈɑ', 'liv': 'lˈɪv', 'shah': 'ʃˈɑ', 'mah': 'mˈɑ', 'yeem': 'jˈim'}
+    return table.get(text, text)
+
+
+def test_pack_uses_only_kokoro_symbols():
+    for word, ps, _hint in HEBREW_PACK:
+        assert set(ps) <= US_VOCAB, (word, set(ps) - US_VOCAB)
+        assert ps.count('ˈ') == 1, word
+
+
+def test_respelling_and_ipa():
+    assert respell('yah-HOO-ah', fake_g2p) == 'jɑhˈuɑ'
+    assert respell('shah-MAH-yeem', fake_g2p) == 'ʃɑmˈɑjim'
+    assert respell('liv', fake_g2p) == 'lˈɪv'
+    assert normalize_ipa('/jaˈhuːa/') == 'jɑˈhuɑ'
+    assert normalize_ipa("/ʃaˈmajim/") == 'ʃɑˈmɑjim'
+    assert normalize_ipa('/maɪ/') == 'mI'
+    assert normalize_ipa('/tʃeɪn/') == 'ʧAn'
+    assert normalize_ipa('jɑhˈuɑ') == 'jɑhˈuɑ'  # misaki input is left alone
+
+
+def test_live_heteronym():
+    assert fix_heteronyms('Live by every word.') == '[Live](/lˈɪv/) by every word.'
+    assert fix_heteronyms('We will live forever.') == 'We will [live](/lˈɪv/) forever.'
+    assert fix_heteronyms('Join the live stream.') == 'Join the [live](/lˈIv/) stream.'
+    assert fix_heteronyms('In five minutes we go live.') == 'In five minutes we go [live](/lˈIv/).'
+    assert fix_heteronyms('[live](/lˈIv/) and lives and alive') == '[live](/lˈIv/) and lives and alive'
+
+
+def test_rules_and_inline_links_become_phonemes():
+    resolve = make_resolver(fake_g2p)
+    rules = [{'word': 'Yahuah', 'say': 'yah-HOO-ah'}, {'word': 'Qadash', 'say': '/kɑdˈɑʃ/'}]
+    items, _ = parse_script('Yahuah is qadash. Say [Shamayim](shah-MAH-yeem) and live well.', pronunciations=rules, resolve=resolve)
+    speak = ' '.join(i['speak'] for i in items)
+    assert '[Yahuah](/jɑhˈuɑ/)' in speak and '[qadash](/kɑdˈɑʃ/)' in speak
+    assert '[Shamayim](/ʃɑmˈɑjim/)' in speak and '[live](/lˈɪv/)' in speak
+    assert items[0]['text'].startswith('Yahuah is qadash.')  # captions keep the real spelling
+
+
+def test_engine_phonemize_and_pack_in_catalog(engine):
+    from studio.engine import public_catalog
+    assert len(public_catalog()['packs']['hebrew']['words']) >= 50
+    engine.pipelines['a'].g2p = lambda t: (f'<{t}>', [])
+    out = engine.phonemize({'text': 'Praise Yahuah.', 'pronunciations': [{'word': 'Yahuah', 'say': '/jɑhˈuɑ/'}]})
+    assert out['sentences'][0]['phonemes'] == '<Praise [Yahuah](/jɑhˈuɑ/).>'

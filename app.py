@@ -112,6 +112,18 @@ def generate():
     return jsonify({'ok': True, 'recording': _links(meta)})
 
 
+@app.post('/api/phonemize')
+def phonemize():
+    """Show the phonemes Kokoro will read, to debug pronunciations."""
+    payload, error = _payload()
+    if error:
+        return error
+    try:
+        return jsonify(engine.phonemize(payload))
+    except Exception as exc:  # noqa: BLE001
+        return _failure(exc)
+
+
 @app.post('/api/preview')
 def preview():
     """Audition a line with the current direction. Nothing is saved."""

@@ -172,10 +172,15 @@
       </section>
 
       <section class="group">
-        <h2>Pronunciation <span class="muted h-note">applies to every take</span></h2>
+        <h2>Pronunciation <span class="muted h-note" id="pronCount">applies to every take</span></h2>
         <div id="pronList" class="pron-list"></div>
-        <button class="btn ghost wide" id="addPron">Add word</button>
-        <p class="note">Write how it should sound (<span class="mono">SQL → sequel</span>) or give phonemes between slashes (<span class="mono">/kˈOkəɹO/</span>).</p>
+        <div class="row two pron-actions">
+          <button class="btn ghost" id="addPron">Add word</button>
+          <button class="btn ghost" id="addPack" title="Yahuah, Elohim, Qadash, Shamayim, Mishlei, Torah and about 60 more">Add Hebrew names</button>
+        </div>
+        <button class="btn ghost wide" id="checkLine" title="Show the sounds Kokoro will use for the line at the cursor">Check line at cursor</button>
+        <div class="pron-check" id="pronCheck" hidden></div>
+        <p class="note">Say it like: <span class="mono">liv</span> (sounds-like), <span class="mono">yah-HOO-ah</span> (syllables, CAPS = stress) or <span class="mono">/jɑhˈuɑ/</span> (phonemes). For one spot only, write <span class="mono">[live](liv)</span> in the script.</p>
       </section>
 
       <button class="link-btn reset" id="resetBtn">Reset direction to defaults</button>
@@ -211,9 +216,16 @@
       <tr><td class="mono">[voice=george]</td><td>Switch speaker for dialogue. <span class="mono">[voice=default]</span> switches back.</td></tr>
       <tr><td class="mono">[speed=1.1]</td><td>Speed up or slow down the following text relative to the Pace slider.</td></tr>
       <tr><td class="mono">*word*</td><td>Lean on a word.</td></tr>
-      <tr><td class="mono">[Kokoro](/kˈOkəɹO/)</td><td>Exact pronunciation using Kokoro's phoneme notation.</td></tr>
+      <tr><td class="mono">[Yahuah](yah-HOO-ah)</td><td>Say this word like this, just here. Split syllables with hyphens and CAPITALISE the stressed one.</td></tr>
+      <tr><td class="mono">[live](liv)</td><td>Sounds-like spelling for one word. Useful for words like <em>live</em>, <em>read</em> or <em>lead</em> whose sound depends on meaning.</td></tr>
+      <tr><td class="mono">[Kokoro](/kˈOkəɹO/)</td><td>Exact phonemes. Ordinary IPA works too and is converted for you.</td></tr>
     </table>
     <p>Emotions: neutral, warm, joyful, excited, curious, confident, calm, sad, angry, fearful, dramatic, soft.</p>
+
+    <h2>Pronunciation</h2>
+    <p>Kokoro guesses names it hasn't seen from their spelling, and that often goes wrong for Hebrew and other non-English words. Add a word once in the side panel's Pronunciation list and it's fixed in every take. <strong>Add Hebrew names</strong> loads about 60 Scripture and Hebrew-roots names (Yahuah, Elohim, Qadash, Shamayim, Mishlei and more). You can edit any of them, and ▷ plays a word on its own.</p>
+    <p>"Live" is read as <em>liv</em> unless the next word makes it the broadcast sense (<em>live stream</em>, <em>live music</em>) or it ends a phrase like <em>we go live</em>. Override any spot with <span class="mono">[live](lyve)</span>.</p>
+    <p><strong>Check line at cursor</strong> shows the sounds Kokoro will use, so you can see exactly what it reads.</p>
 
     <h2>Writing for video</h2>
     <ul>

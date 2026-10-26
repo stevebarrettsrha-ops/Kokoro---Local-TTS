@@ -7,7 +7,8 @@ Supported directions (case-insensitive):
   [voice=george]         switch speaker (voice id or display name)
   [speed=1.1]            relative pace for the following text (1 = normal)
   *word*                 emphasis (raises lexical stress)
-  [word](/fəˈnɛtɪks/)    Kokoro/misaki inline pronunciation, passed through
+  [word](/fəˈnɛtɪks/)    exact phonemes for one spot (IPA is cleaned up)
+  [word](yah-HOO-ah)     sounds-like spelling for one spot; CAPS = stress
 
 Speech is split into sentences so pacing and captions can be controlled per
 sentence. Blank lines become paragraph breaks.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import re
 
+from .phonemes import fix_heteronyms, normalize_ipa
 from .styles import canonical_style
 
 MAX_PAUSE_MS = 10000
@@ -69,19 +71,49 @@ def split_sentences(text):
     return merged
 
 
-def apply_pronunciations(text, rules):
-    """Replace whole words using user rules. '/.../' values are phonemes."""
+def apply_pronunciations(text, rules, resolve=None):
+    """Replace whole words using user rules.
+
+    `resolve(say)` turns a rule's "say it like" value into phonemes; when it
+    returns None (no G2P available) the value is spoken as plain text.
+    """
     for rule in rules or []:
         word = str(rule.get('word', '')).strip()
         say = str(rule.get('say', '')).strip()
-        if not word or not say or len(word) > 60 or len(say) > 120:
+        if not word or not say or len(word) > 60 or len(say) > 160:
             continue
         pattern = re.compile(r'(?<![\w\[])' + re.escape(word) + r'(?![\w\]])', re.I)
-        if len(say) > 2 and say.startswith('/') and say.endswith('/'):
-            text = pattern.sub(lambda m: f'[{m.group(0)}]({say})', text)
+        ps = resolve(say) if resolve else None
+        if ps is None and len(say) > 2 and say.startswith('/') and say.endswith('/'):
+            ps = normalize_ipa(say)
+        if ps:
+            text = pattern.sub(lambda m, ps=ps: f'[{m.group(0)}](/{ps}/)', text)
         else:
-            text = pattern.sub(lambda _m: say, text)
+            text = pattern.sub(lambda _m, say=say: say, text)
     return text
+
+
+def resolve_links(text, resolve=None):
+    """Clean inline [word](...) links: tidy IPA, turn sounds-like into phonemes."""
+    def fix(m):
+        word, f = m.group(1), m.group(2).strip()
+        if re.fullmatch(r'[+-]?\d+(\.5)?|#.*#', f):
+            return m.group(0)  # misaki stress / number flags
+        ps = resolve(f) if resolve else None
+        if ps is None and len(f) > 2 and f.startswith('/') and f.endswith('/'):
+            ps = normalize_ipa(f)
+        if ps:
+            return f'[{word}](/{ps}/)'
+        return word if not f else f  # no G2P: speak the respelling as text
+    return LINK_RE.sub(fix, text)
+
+
+def prepare_speech(sentence, rules=None, resolve=None, heteronyms=True):
+    text = resolve_links(sentence, resolve)
+    text = apply_pronunciations(text, rules, resolve)
+    if heteronyms:
+        text = fix_heteronyms(text)
+    return apply_emphasis(text)
 
 
 def apply_emphasis(text):
@@ -104,7 +136,7 @@ def display_text(text):
     return ' '.join(text.split())
 
 
-def parse_script(source, voices=None, pronunciations=None):
+def parse_script(source, voices=None, pronunciations=None, resolve=None, heteronyms=True):
     """Return (items, warnings).
 
     `voices` maps voice id -> display name and is used to validate [voice=...].
@@ -122,7 +154,7 @@ def parse_script(source, voices=None, pronunciations=None):
                 shown = display_text(sentence)
                 if not re.search(r'\w', shown):
                     continue
-                speak = apply_emphasis(apply_pronunciations(sentence, pronunciations))
+                speak = prepare_speech(sentence, pronunciations, resolve, heteronyms)
                 items.append({'kind': 'speech', 'text': shown, 'speak': speak, **state})
             if i < len(paragraphs) - 1:
                 items.append({'kind': 'pause', 'ms': None, 'para': True})

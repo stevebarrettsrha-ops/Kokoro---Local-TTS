@@ -30,6 +30,7 @@ class FakePipeline:
         self.lang_code = lang
         self.voices = {}
         self.calls = []
+        self.g2p = lambda text: (text, [])
 
     def load_voice(self, voice):
         if voice not in self.voices:
