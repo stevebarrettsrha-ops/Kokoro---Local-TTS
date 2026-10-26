@@ -11,6 +11,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from studio.engine import Engine
+from studio import video as vid
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / 'static'
@@ -18,9 +19,13 @@ OUT = HERE / 'outputs'
 ID_RE = re.compile(r'[0-9a-f]{32}')
 
 engine = Engine(OUT, HERE / 'voices')
+CREATIONS = HERE / 'creations'  # everything the video editor makes lives here
+media = vid.MediaLibrary(CREATIONS / 'media')
+projects = vid.ProjectStore(CREATIONS / 'projects')
+exports = vid.ExportJobs(CREATIONS / 'exports')
 app = Flask(__name__, static_folder=None)
 app.json.sort_keys = False
-app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # voice uploads
+app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 ** 3  # video uploads can be large
 
 
 def device_status():
@@ -43,7 +48,8 @@ def local_only():
 
 @app.after_request
 def private_headers(response):
-    response.headers['Cache-Control'] = 'no-store'
+    immutable = request.method == 'GET' and request.path.startswith('/api/media/')
+    response.headers['Cache-Control'] = 'private, max-age=86400' if immutable else 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'no-referrer'
@@ -205,8 +211,11 @@ def add_cloned_voice():
         return jsonify({'error': 'Choose an audio file.'}), 400
     if request.form.get('consent') != 'yes':
         return jsonify({'error': 'Confirm you have the speaker\'s permission to use their voice.'}), 400
+    data = upload.read(150 * 1024 * 1024 + 1)
+    if len(data) > 150 * 1024 * 1024:
+        return jsonify({'error': 'That recording is too large. 10-30 seconds of audio is all that is needed.'}), 400
     try:
-        voice = engine.library.add(upload.read(), upload.filename or '', request.form.get('name', ''),
+        voice = engine.library.add(data, upload.filename or '', request.form.get('name', ''),
                                    request.form.get('gender', ''))
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
@@ -240,6 +249,182 @@ def delete_recording(rid):
             removed += 1
     if not removed:
         abort(404)
+    return jsonify({'ok': True})
+
+
+# ================================================================ video editor
+def _take_exists(rid):
+    return ID_RE.fullmatch(rid or '') is not None and (OUT / f'{rid}.wav').is_file()
+
+
+def _resolve_media(mid):
+    """Media id or take:<id> -> (path, has_audio)."""
+    if isinstance(mid, str) and mid.startswith('take:'):
+        rid = mid[5:]
+        return ((OUT / f'{rid}.wav'), True) if _take_exists(rid) else (None, False)
+    meta = media.get(mid)
+    path = media.path(mid)
+    return (path, bool(meta and meta.get('has_audio'))) if path else (None, False)
+
+
+@app.get('/api/video/status')
+def video_status():
+    t = vid.tools()
+    return jsonify({'ffmpeg': bool(t['ffmpeg']), 'ffprobe': bool(t['ffprobe']), 'formats': vid.FORMATS})
+
+
+@app.get('/api/media')
+def media_list():
+    return jsonify({'media': media.list()})
+
+
+@app.post('/api/media')
+def media_upload():
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'Choose files to upload.'}), 400
+    added, errors = [], []
+    for f in files[:50]:
+        tmp = media.dir / f'.upload-{os.urandom(8).hex()}'
+        try:
+            f.save(tmp)
+            added.append(media.add_path(tmp, f.filename or ''))
+        except (ValueError, RuntimeError) as exc:
+            errors.append(str(exc))
+        finally:
+            tmp.unlink(missing_ok=True)
+    status = 200 if added or not errors else 400
+    return jsonify({'added': added, 'errors': errors, **({'error': errors[0]} if not added and errors else {})}), status
+
+
+@app.get('/api/media/<mid>/file')
+def media_file(mid):
+    path = media.path(mid, preview=request.args.get('preview') == '1')
+    if path is None:
+        abort(404)
+    return send_file(path, conditional=True)
+
+
+@app.get('/api/media/<mid>/thumb')
+def media_thumb(mid):
+    path = media.thumb(mid) if vid.ID_RE.fullmatch(mid) else None
+    if path is None:
+        abort(404)
+    return send_file(path, mimetype='image/jpeg')
+
+
+@app.patch('/api/media/<mid>')
+def media_rename(mid):
+    meta = media.rename(mid, (request.get_json(silent=True) or {}).get('name', ''))
+    return jsonify({'media': meta}) if meta else abort(404)
+
+
+@app.delete('/api/media/<mid>')
+def media_delete(mid):
+    return jsonify({'ok': True}) if media.delete(mid) else abort(404)
+
+
+@app.get('/api/recordings/<rid>/cues')
+def take_cues(rid):
+    """Caption cues of a voice take, so the editor can lay them out as on-screen text."""
+    path = _take_path(rid, 'srt')
+    cues = []
+    for block in path.read_text(encoding='utf-8').strip().split('\n\n'):
+        lines = block.strip().splitlines()
+        if len(lines) < 3 or '-->' not in lines[1]:
+            continue
+        a, b = (x.strip() for x in lines[1].split('-->'))
+        to_s = lambda ts: sum(float(x) * m for x, m in zip(ts.replace(',', '.').split(':'), (3600, 60, 1)))
+        cues.append({'start': round(to_s(a), 3), 'end': round(to_s(b), 3), 'text': '\n'.join(lines[2:])})
+    return jsonify({'cues': cues})
+
+
+@app.get('/api/video/projects')
+def project_list():
+    return jsonify({'projects': projects.list()})
+
+
+@app.post('/api/video/projects')
+def project_create():
+    body = request.get_json(silent=True) or {}
+    body.pop('id', None)
+    project = vid.sanitize_project(body, media, _take_exists)
+    return jsonify({'project': projects.save(project)})
+
+
+@app.get('/api/video/projects/<pid>')
+def project_get(pid):
+    p = projects.get(pid)
+    return jsonify({'project': p}) if p else abort(404)
+
+
+@app.put('/api/video/projects/<pid>')
+def project_save(pid):
+    if not vid.ID_RE.fullmatch(pid):
+        abort(404)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': 'Invalid project.'}), 400
+    old = projects.get(pid) or {}
+    project = vid.sanitize_project({**body, 'id': pid, 'created': old.get('created')}, media, _take_exists)
+    return jsonify({'project': projects.save(project)})
+
+
+@app.delete('/api/video/projects/<pid>')
+def project_delete(pid):
+    return jsonify({'ok': True}) if projects.delete(pid) else abort(404)
+
+
+@app.post('/api/video/projects/<pid>/export')
+def project_export(pid):
+    body = request.get_json(silent=True) or {}
+    if isinstance(body.get('project'), dict):
+        old = projects.get(pid) or {}
+        projects.save(vid.sanitize_project({**body['project'], 'id': pid, 'created': old.get('created')}, media, _take_exists))
+    project = projects.get(pid)
+    if not project:
+        abort(404)
+    lufs = body.get('lufs')
+    lufs = None if lufs in (None, '', 'off') else vid._num(lufs, -30, -8, -14)
+    quality = body.get('quality') if body.get('quality') in ('high', 'standard', 'small') else 'high'
+    try:
+        job = exports.start(project, _resolve_media, body.get('text_images') or {}, lufs=lufs, quality=quality)
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'job': job})
+
+
+@app.get('/api/video/jobs/<jid>')
+def job_status(jid):
+    job = exports.get(jid)
+    return jsonify({'job': job}) if job else abort(404)
+
+
+@app.post('/api/video/jobs/<jid>/cancel')
+def job_cancel(jid):
+    return jsonify({'ok': exports.cancel(jid)})
+
+
+@app.get('/api/video/exports')
+def export_list():
+    return jsonify({'exports': exports.exports()})
+
+
+@app.get('/api/video/exports/<name>')
+def export_file(name):
+    path = exports.export_path(name)
+    if path is None:
+        abort(404)
+    return send_file(path, mimetype='video/mp4', conditional=True,
+                     as_attachment=request.args.get('download') == '1', download_name=name)
+
+
+@app.delete('/api/video/exports/<name>')
+def export_delete(name):
+    path = exports.export_path(name)
+    if path is None:
+        abort(404)
+    path.unlink()
     return jsonify({'ok': True})
 
 

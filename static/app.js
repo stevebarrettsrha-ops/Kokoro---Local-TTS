@@ -76,8 +76,13 @@ $('#themeBtn').onclick = () => {
 function show(view) {
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  document.body.dataset.view = view;
+  if (view !== 'script' && !audio.paused) audio.pause();
   if (view === 'takes') loadTakes();
+  if (view === 'video') window.KVideo?.onShow();
+  else window.KVideo?.onHide();
 }
+document.body.dataset.view = 'script';
 $$('.tab').forEach(t => t.onclick = () => show(t.dataset.view));
 
 /* ---------- emotion model (mirrors studio/styles.py) ---------- */
@@ -496,6 +501,7 @@ async function loadTake(rec, autoplay = false) {
   $('#meter').textContent = rec.lufs != null && isFinite(rec.lufs) ? `${(+rec.lufs).toFixed(1)} LUFS · ${(+rec.true_peak).toFixed(1)} dBTP` : '— LUFS';
   const link = (id, href) => { const a = $(id); if (href) { a.href = href; a.removeAttribute('aria-disabled'); a.setAttribute('download', ''); } else { a.removeAttribute('href'); a.setAttribute('aria-disabled', 'true'); } };
   link('#dlWav', rec.download_url); link('#dlMp3', rec.mp3_url); link('#dlSrt', rec.srt_url); link('#dlVtt', rec.vtt_url);
+  $('#toVideo').disabled = false;
   state.peaks = null; paintWave();
   try {
     const buf = await (await fetch(rec.audio_url)).arrayBuffer();
@@ -638,6 +644,7 @@ $('#auditionEmotion').onclick = () => {
   preview(lines[state.style] || lines.neutral);
 };
 document.addEventListener('keydown', e => {
+  if (document.body.dataset.view !== 'script') return;
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.shiftKey ? preview(lineAtCursor()) : render(); }
   if (e.key === ' ' && !['TEXTAREA', 'INPUT', 'SELECT', 'BUTTON'].includes(document.activeElement.tagName) && document.activeElement.getAttribute('role') !== 'slider' && state.take) {
     e.preventDefault(); audio.paused ? audio.play() : audio.pause();
@@ -671,11 +678,13 @@ async function loadTakes() {
         ${r.captions ? `<a class="ex" href="${r.srt_url}" download>SRT</a><a class="ex" href="${r.vtt_url}" download>VTT</a>` : ''}
       </div>
       <div class="take-act">
+        <button class="link-btn" data-tovideo="${i}">Add to video</button>
         ${r.text ? `<button class="link-btn" data-open="${i}">Open script</button>` : ''}
         <button class="link-btn danger" data-del="${r.id}">Delete</button>
       </div>
     </article>`).join('');
   $$('.play-take').forEach(b => b.onclick = () => loadTake(items[+b.dataset.i], true));
+  $$('[data-tovideo]').forEach(b => b.onclick = () => window.KVideo?.addTake(items[+b.dataset.tovideo]));
   $$('[data-open]').forEach(b => b.onclick = () => {
     const r = items[+b.dataset.open];
     if (script.value.trim() && script.value !== r.text && !confirm('Replace the current script with this take\'s script and settings?')) return;
@@ -808,5 +817,10 @@ async function init() {
   }
   paintWave();
 }
+$('#toVideo').onclick = () => { if (state.take) window.KVideo?.addTake(state.take); };
+
+// Shared helpers for the video editor (static/video.js).
+window.KStudio = {api, toast, esc, show, COLORS, styles: () => state.styles, refreshCount, fmtShort};
+
 init();
 })();

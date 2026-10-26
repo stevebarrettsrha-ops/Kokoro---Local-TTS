@@ -6,12 +6,14 @@
 <meta name="color-scheme" content="light dark">
 <title>Kokoro Studio</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/video.css">
 </head>
 <body>
 <header class="bar">
   <div class="brand">Kokoro<span>Studio</span></div>
   <nav class="tabs" aria-label="Views">
     <button class="tab active" data-view="script">Script</button>
+    <button class="tab" data-view="video">Video</button>
     <button class="tab" data-view="takes">Takes <span class="count" id="takeCount"></span></button>
     <button class="tab" data-view="guide">Guide</button>
   </nav>
@@ -198,6 +200,103 @@
   </div>
 </section>
 
+<!-- ============ VIDEO ============ -->
+<section class="view" id="view-video">
+  <div class="ve" id="ve">
+    <div class="ve-top">
+      <input id="veName" class="title-input ve-name" placeholder="Untitled video" maxlength="80" aria-label="Video name">
+      <label class="mini inline">Format
+        <select id="veFormat" class="input">
+          <option value="16:9">16:9 · YouTube</option>
+          <option value="9:16">9:16 · Shorts, Reels, TikTok</option>
+          <option value="1:1">1:1 · Square</option>
+          <option value="4:5">4:5 · Portrait post</option>
+        </select>
+      </label>
+      <label class="mini inline">Background <input type="color" id="veBg" value="#000000"></label>
+      <span class="muted ve-saved" id="veSaved"></span>
+      <span class="grow"></span>
+      <button class="link-btn" id="veUndo" title="Undo (Ctrl+Z)">Undo</button>
+      <button class="link-btn" id="veRedo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button class="link-btn" id="veOpen">Projects &amp; exports</button>
+      <button class="link-btn" id="veNew">New video</button>
+      <button class="render-btn small" id="veExport"><span class="rec-dot" aria-hidden="true"></span>Export MP4</button>
+    </div>
+
+    <div class="ve-main">
+      <aside class="ve-bin" aria-label="Media">
+        <div class="ve-bin-tabs" role="tablist">
+          <button class="active" data-bin="media" role="tab">Uploads</button>
+          <button data-bin="voices" role="tab">Voices</button>
+          <button data-bin="text" role="tab">Text</button>
+          <button data-bin="shapes" role="tab">Shapes</button>
+        </div>
+        <div class="ve-bin-body" data-pane="media">
+          <label class="ve-drop" id="veDrop">
+            <input type="file" id="veFiles" multiple accept="image/*,video/*,audio/*,.mov,.mkv,.m4a,.flac" hidden>
+            <b>Upload pictures, video or music</b>
+            <span class="muted">or drop files here</span>
+          </label>
+          <button type="button" class="btn ghost wide" id="veRecord">Record yourself</button>
+          <div class="ve-upload-state muted" id="veUploadState"></div>
+          <div class="ve-grid" id="veMedia"></div>
+        </div>
+        <div class="ve-bin-body" data-pane="voices" hidden>
+          <p class="note">Voice takes from the Script tab. Add one to the timeline, with or without its captions as on-screen text.</p>
+          <div id="veTakes" class="ve-takes"></div>
+        </div>
+        <div class="ve-bin-body" data-pane="text" hidden>
+          <div class="ve-presets" id="veTextPresets"></div>
+        </div>
+        <div class="ve-bin-body" data-pane="shapes" hidden>
+          <div class="ve-presets" id="veShapePresets"></div>
+        </div>
+      </aside>
+
+      <div class="ve-center">
+        <div class="ve-stage-wrap" id="veStageWrap">
+          <div class="ve-stage" id="veStage">
+            <canvas id="veCanvas"></canvas>
+            <div class="ve-guide v" id="veGuideV" hidden></div>
+            <div class="ve-guide h" id="veGuideH" hidden></div>
+            <div class="ve-sel" id="veSel" hidden>
+              <i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i>
+            </div>
+          </div>
+        </div>
+        <div class="ve-transport">
+          <button class="icon-btn" id="veStart" aria-label="Go to start" title="Go to start">⏮</button>
+          <button class="icon-btn play" id="vePlay" aria-label="Play">▶</button>
+          <span class="mono clock" id="veClock">0:00.0 / 0:00.0</span>
+          <span class="grow"></span>
+          <span class="muted ve-hint">Space play · S split · Del delete · Ctrl+D duplicate</span>
+        </div>
+      </div>
+
+      <aside class="ve-props" id="veProps" aria-label="Properties"></aside>
+    </div>
+
+    <div class="ve-timeline">
+      <div class="ve-tl-tools">
+        <button class="btn ghost" id="veSplit" title="Split at playhead (S)">Split</button>
+        <button class="btn ghost" id="veDup" title="Duplicate (Ctrl+D)">Duplicate</button>
+        <button class="btn ghost" id="veDel" title="Delete (Del)">Delete</button>
+        <label class="mini inline"><input type="checkbox" id="veSnap" checked> Snap</label>
+        <span class="grow"></span>
+        <label class="mini inline">Zoom <input type="range" id="veZoom" min="8" max="240" value="60"></label>
+      </div>
+      <div class="ve-tl" id="veTl">
+        <div class="ve-lane-heads" id="veHeads"></div>
+        <div class="ve-scroll" id="veScroll">
+          <div class="ve-ruler" id="veRuler"></div>
+          <div class="ve-lanes" id="veLanes"></div>
+          <div class="ve-playhead" id="vePlayhead"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ TAKES ============ -->
 <section class="view" id="view-takes">
   <div class="page">
@@ -239,6 +338,9 @@
 
     <h2>Your own voices</h2>
     <p>In the Voice panel, <strong>Add a voice from a recording…</strong> makes a voice from 10–30 seconds of a real person speaking. Chatterbox reproduces their sound, accent and delivery. Only use your own voice, or one you have permission to use. Run <span class="mono">./setup-cloning.sh</span> once before using cloned voices. Emotions still work, pace is approximate, and <strong>Try another read</strong> gives a fresh take if one line comes out wrong.</p>
+
+    <h2>Making the video</h2>
+    <p>Click <strong>→ Video</strong> after rendering (or <strong>Add to video</strong> in Takes) to put a voice on the video timeline. In the Video tab's <em>Voices</em> panel, <strong>Add with captions</strong> also places the spoken words as on-screen text, timed to the voice. Add pictures and clips under <em>Uploads</em>; they play one after another on the Main track. Hover between two scenes and click <strong>+</strong> for a transition, and give text and pictures an entrance or exit in the right-hand panel. Then click <strong>Export MP4</strong>. Your projects and exports are kept in the app's <span class="mono">creations/</span> folder.</p>
 
     <h2>Writing for video</h2>
     <ul>
@@ -283,6 +385,7 @@
     <a class="ex" id="dlMp3" aria-disabled="true">MP3</a>
     <a class="ex" id="dlSrt" aria-disabled="true">SRT</a>
     <a class="ex" id="dlVtt" aria-disabled="true">VTT</a>
+    <button class="ex to-video" id="toVideo" disabled title="Put this take on the video timeline">→ Video</button>
   </div>
   <div class="msg" id="msg" role="status" aria-live="polite"></div>
 </footer>
@@ -321,9 +424,64 @@
   </form>
 </dialog>
 
+<dialog id="veExportDialog" class="dialog" aria-labelledby="veExTitle">
+  <form method="dialog" class="dialog-body" id="veExportForm">
+    <div class="dialog-head"><h2 id="veExTitle">Export video</h2><button class="icon-btn" value="close" formnovalidate aria-label="Close">×</button></div>
+    <p class="muted" id="veExSummary"></p>
+    <div class="row two">
+      <label class="mini">Quality
+        <select class="input" name="quality"><option value="high">High (best for uploading)</option><option value="standard">Standard</option><option value="small">Smaller file</option></select>
+      </label>
+      <label class="mini">Sound level
+        <select class="input" name="lufs"><option value="off">Keep as mixed</option><option value="-14">Even out to −14 LUFS (YouTube, social)</option><option value="-16">Even out to −16 LUFS</option></select>
+      </label>
+    </div>
+    <div class="ve-progress" id="veExProgress" hidden><div class="bar"><i id="veExBar"></i></div><span class="mono" id="veExPct">0%</span></div>
+    <div id="veExResult"></div>
+    <div class="dialog-foot">
+      <span class="msg" id="veExMsg"></span>
+      <button type="button" class="btn ghost" id="veExCancel" hidden>Cancel</button>
+      <button class="render-btn small" id="veExGo" value="default">Export</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="veDesignDialog" class="dialog wide" aria-labelledby="veDsTitle">
+  <form method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2 id="veDsTitle">Create a video</h2><button class="icon-btn" value="close" aria-label="Close">×</button></div>
+    <input class="input ve-design-search" id="veDesignSearch" placeholder="What would you like to make?" autocomplete="off">
+    <div class="ve-designs" id="veDesigns"></div>
+  </form>
+</dialog>
+
+<dialog id="veRecordDialog" class="dialog wide" aria-labelledby="veRcTitle">
+  <form method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2 id="veRcTitle">Record yourself</h2><button class="icon-btn" value="close" aria-label="Close">×</button></div>
+    <video id="veCam" class="ve-cam" playsinline muted></video>
+    <div class="dialog-foot">
+      <span class="msg" id="veRecMsg"></span>
+      <button type="button" class="btn ghost" id="veRecStop" hidden>Stop</button>
+      <button type="button" class="btn ghost" id="veRecUse" hidden>Add to uploads</button>
+      <button type="button" class="render-btn small" id="veRecStart"><span class="rec-dot" aria-hidden="true"></span>Start recording</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="veOpenDialog" class="dialog wide" aria-labelledby="veOpTitle">
+  <form method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2 id="veOpTitle">Projects &amp; exports</h2><button class="icon-btn" value="close" aria-label="Close">×</button></div>
+    <p class="muted">Everything here is kept in the <span class="mono">creations/</span> folder inside the app.</p>
+    <h3>Video projects</h3>
+    <div id="veProjectList" class="clone-list"></div>
+    <h3>Exported videos</h3>
+    <div id="veExportList" class="clone-list"></div>
+  </form>
+</dialog>
+
 <audio id="audio" preload="auto"></audio>
 <input type="file" id="fileInput" accept=".txt,.md,.json,text/plain,application/json" hidden>
 <div class="toast" id="toast" role="alert"></div>
 <script src="/static/app.js"></script>
+<script src="/static/video.js"></script>
 </body>
 </html>
