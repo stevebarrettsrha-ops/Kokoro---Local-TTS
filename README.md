@@ -1,6 +1,8 @@
 # Kokoro Studio
 
-A local voice-over studio for [Kokoro 82M](https://github.com/hexgrad/kokoro), built for narration and video. You write a script, direct the read with emotions, pauses and emphasis, and render a finished take. Each take comes with loudness-matched audio and SRT/VTT captions.
+A local voice-over and video studio built on [Kokoro 82M](https://github.com/hexgrad/kokoro). You write a script, direct the read with emotions, pauses and emphasis, and render a finished take. Each take comes with loudness-matched audio and SRT/VTT captions.
+
+It has three parts that work together: **Script**, where you write and direct voice-overs; **Your voices**, which clones a voice from a recording; and **Video**, a Canva-style editor where voices, pictures, clips, music and text come together on one timeline.
 
 Everything runs on your machine. The browser UI talks to a Python engine bound to `127.0.0.1`.
 
@@ -64,6 +66,33 @@ While online, run `./start.sh` once, stop it, then run `./download-models.sh`. A
 
 Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar shows the device. Install a CUDA build of PyTorch into `.venv` following [pytorch.org](https://pytorch.org/get-started/locally/) if it shows CPU. Force CPU with `KOKORO_DEVICE=cpu ./start.sh`. US and UK voices now share one model in memory.
 
+## Video editor
+
+The **Video** tab is a Canva-style editor built into the studio. It runs entirely on your computer; ffmpeg does the final render.
+
+- **Create a video**: pick Landscape, YouTube, YouTube Shorts, TikTok, Instagram Reel, Facebook, Instagram post or Square, and the frame is set up for you. You can change the format at any time.
+- **Uploads**: drop in pictures (JPG, PNG, WebP), video (MP4, MOV including iPhone HEVC, WebM, MKV) or music (MP3, WAV, M4A…). **Record yourself** captures camera and mic straight into your uploads. Videos the browser can't play get a lightweight preview copy; the export always uses the original.
+- **Voices**: every take from the Script tab, built-in or cloned, is here. **Add with captions** puts the voice on the Voice track and its words on the Text track, timed from the voice. You can also click **→ Video** after rendering, or **Add to video** in Takes.
+- **Text**: presets (title, subtitle, lower third, caption, headline, quote, scripture, neon, glitch) and Canva-style effects: Shadow, Lift, Hollow, Splice, Outline, Echo, Glitch, Neon and Background.
+- **Shapes**: colour blocks and overlays (dim overlay, bottom band, side panel, letterbox bars).
+- **Transitions**: hover the line between two scenes on a track and click **+**, or use the panel on the right. Choose Crossfade, Dip to background, Slide left/right/up/down or Zoom. **Use for every scene change** applies one to the whole track.
+- **Animations**: every picture, clip, text or shape can have an entrance and an exit (Fade, Rise, Drop, four Slides, Pop, Zoom). Title presets come animated. **Preview animation** plays just that moment.
+- **Timeline**: Text, Layer 3, Layer 2 and Main tracks for visuals (higher tracks draw on top), plus Voice, Music and Sound tracks for audio. Pictures and clips you add play one after another on Main. Drag clips to move them and drag edges to trim. **S** splits, **Del** deletes, **Ctrl+D** duplicates and **Ctrl+Z** undoes. Snapping lines up clip edges and the playhead.
+- **On the picture**: drag to move, use the corners to resize (Shift stretches), and guides help you centre things.
+- **Properties**: position, crop or fit, opacity, fades, slow zoom (Ken Burns), volume and mute.
+- **Export MP4**: H.264/AAC at the project size. You can optionally even the sound out to −14 LUFS for YouTube and social. Text, transitions and animations are computed by the same rules in the preview and the export, so the file matches what you saw.
+
+Everything the editor makes lives in one folder inside the app, which is not committed to git:
+
+```
+creations/
+  media/      your uploads (+ thumbnails and preview copies)
+  projects/   saved videos (autosaved as you edit)
+  exports/    finished MP4s
+```
+
+ffmpeg is required: `sudo apt install ffmpeg`.
+
 ## Directing a script
 
 | Write | Effect |
@@ -107,6 +136,34 @@ Pick a second voice under *Blend with*.
 - **Voice** mixes the two timbres.
 - **Delivery** keeps your voice's sound but borrows the other voice's rhythm and melody. Kokoro's style vector stores timbre and prosody separately, so only the prosody half is mixed.
 
+### Your own voices (voice cloning)
+
+Built-in Kokoro voices can't be changed into a different person, so the studio can also make a voice from a recording of a real speaker. This uses [Chatterbox](https://github.com/resemble-ai/chatterbox) by Resemble AI (MIT licence), which runs locally. A clone captures the speaker's sound, accent and way of speaking.
+
+**One-time setup** (stop the studio first):
+
+```bash
+./setup-cloning.sh
+```
+
+This creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro. It also downloads the model. Plan for about 6 GB of packages plus about 3 GB of model; the download is safe to rerun if it's interrupted. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
+
+**Adding a voice:** in the Voice panel, choose **Add a voice from a recording…**
+
+- Upload 10–30 seconds of one person speaking naturally, in a quiet room with no music.
+- The studio finds the cleanest 10 seconds and builds the voice from those.
+- Only use your own voice, or a voice whose owner has given you permission.
+
+Cloned voices appear under *Your voices*. They also work in dialogue with `[voice=Marcus]`.
+
+**What works with cloned voices:**
+- Scripts, pauses, captions, loudness and the Hebrew name pack. For cloned voices, pronunciations use the sounds-like spelling, e.g. *yah-hoo-ah*.
+- Emotion buttons and the gauge set Chatterbox's emotion strength.
+- Pace is approximate.
+- Each read varies slightly; **Try another read** re-renders with a different take.
+
+Recordings stay in `voices/`, which is not committed to git. Chatterbox adds an inaudible watermark to its output, as its authors intend.
+
 ### Output presets
 
 *Made for* sets loudness, sample rate and pacing for YouTube narration, explainers, documentary, Shorts/Reels/TikTok, ads, podcasts, broadcast (EBU R128) and audiobooks. Everything stays editable afterwards.
@@ -131,7 +188,9 @@ Your current draft and theme are kept in this browser's local storage so a refre
 - `studio/phonemes.py`: sounds-like respelling, IPA clean-up, Hebrew name pack, *live* fix
 - `studio/audio.py`: loudness (ITU BS.1770), limiter, polish, room tone
 - `studio/captions.py`: SRT/VTT builder
-- `static/`: the web UI
+- `studio/cloning.py`, `cloning/chatterbox_worker.py`, `setup-cloning.sh`: cloned voices (Chatterbox in its own environment)
+- `studio/video.py`: media library, video projects, transitions/animation plan, ffmpeg export
+- `static/`: the web UI (`video.js` and `video.css` hold the editor)
 - `tests/`: `pip install -r requirements-dev.txt && pytest -q`. The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
 
 ## Limits

@@ -76,8 +76,13 @@ $('#themeBtn').onclick = () => {
 function show(view) {
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  document.body.dataset.view = view;
+  if (view !== 'script' && !audio.paused) audio.pause();
   if (view === 'takes') loadTakes();
+  if (view === 'video') window.KVideo?.onShow();
+  else window.KVideo?.onHide();
 }
+document.body.dataset.view = 'script';
 $$('.tab').forEach(t => t.onclick = () => show(t.dataset.view));
 
 /* ---------- emotion model (mirrors studio/styles.py) ---------- */
@@ -199,7 +204,7 @@ $('#target').addEventListener('input', () => { updateEstimate(); changed(); });
 
 function readSettings() {
   return {
-    voice: $('#voice').value, blend_voice: $('#blendVoice').value, blend: +$('#blend').value, blend_mode: state.blendMode,
+    voice: $('#voice').value === '__add' ? lastVoice : $('#voice').value, variation: state.variation || 0, blend_voice: $('#blendVoice').value, blend: +$('#blend').value, blend_mode: state.blendMode,
     style: state.style, intensity: state.intensity,
     speed: +$('#speed').value, pitch: +$('#pitch').value, range: +$('#range').value, energy: +$('#energy').value,
     punct: +$('#punct').value, sentence_gap: +$('#sentence_gap').value, paragraph_gap: +$('#paragraph_gap').value,
@@ -211,6 +216,7 @@ function setSelect(el, v) { if (v !== undefined && [...el.options].some(o => o.v
 function applySettings(s) {
   s = {...DEFAULTS, ...(s || {})};
   setSelect($('#voice'), s.voice); setSelect($('#blendVoice'), s.blend_voice || '');
+  state.variation = Number(s.variation) || 0; if (typeof updateVoiceMode === 'function' && state.catalog) updateVoiceMode();
   $('#blendRow').hidden = !$('#blendVoice').value;
   ['blend', 'speed', 'pitch', 'range', 'energy', 'punct', 'sentence_gap', 'paragraph_gap'].forEach(k => {
     const el = $('#' + k), n = Number(s[k]);
@@ -495,6 +501,7 @@ async function loadTake(rec, autoplay = false) {
   $('#meter').textContent = rec.lufs != null && isFinite(rec.lufs) ? `${(+rec.lufs).toFixed(1)} LUFS · ${(+rec.true_peak).toFixed(1)} dBTP` : '— LUFS';
   const link = (id, href) => { const a = $(id); if (href) { a.href = href; a.removeAttribute('aria-disabled'); a.setAttribute('download', ''); } else { a.removeAttribute('href'); a.setAttribute('aria-disabled', 'true'); } };
   link('#dlWav', rec.download_url); link('#dlMp3', rec.mp3_url); link('#dlSrt', rec.srt_url); link('#dlVtt', rec.vtt_url);
+  $('#toVideo').disabled = false;
   state.peaks = null; paintWave();
   try {
     const buf = await (await fetch(rec.audio_url)).arrayBuffer();
@@ -637,6 +644,7 @@ $('#auditionEmotion').onclick = () => {
   preview(lines[state.style] || lines.neutral);
 };
 document.addEventListener('keydown', e => {
+  if (document.body.dataset.view !== 'script') return;
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.shiftKey ? preview(lineAtCursor()) : render(); }
   if (e.key === ' ' && !['TEXTAREA', 'INPUT', 'SELECT', 'BUTTON'].includes(document.activeElement.tagName) && document.activeElement.getAttribute('role') !== 'slider' && state.take) {
     e.preventDefault(); audio.paused ? audio.play() : audio.pause();
@@ -670,11 +678,13 @@ async function loadTakes() {
         ${r.captions ? `<a class="ex" href="${r.srt_url}" download>SRT</a><a class="ex" href="${r.vtt_url}" download>VTT</a>` : ''}
       </div>
       <div class="take-act">
+        <button class="link-btn" data-tovideo="${i}">Add to video</button>
         ${r.text ? `<button class="link-btn" data-open="${i}">Open script</button>` : ''}
         <button class="link-btn danger" data-del="${r.id}">Delete</button>
       </div>
     </article>`).join('');
   $$('.play-take').forEach(b => b.onclick = () => loadTake(items[+b.dataset.i], true));
+  $$('[data-tovideo]').forEach(b => b.onclick = () => window.KVideo?.addTake(items[+b.dataset.tovideo]));
   $$('[data-open]').forEach(b => b.onclick = () => {
     const r = items[+b.dataset.open];
     if (script.value.trim() && script.value !== r.text && !confirm('Replace the current script with this take\'s script and settings?')) return;
@@ -691,18 +701,92 @@ async function loadTakes() {
 }
 $('#refreshTakes').onclick = loadTakes;
 
+/* ---------- voices & cloning ---------- */
+function renderVoiceOptions() {
+  const cat = state.catalog, keep = $('#voice').value;
+  const opt = v => `<option value="${esc(v.id)}">${esc(v.name)} — ${v.accent === 'British' ? 'UK' : 'US'} ${v.gender.toLowerCase()}</option>`;
+  const groups = [['American', 'Female'], ['American', 'Male'], ['British', 'Female'], ['British', 'Male']];
+  const grouped = groups.map(([a, g]) => `<optgroup label="${a === 'British' ? 'UK' : 'US'} · ${g.toLowerCase()}">${cat.voices.filter(v => v.accent === a && v.gender === g).map(opt).join('')}</optgroup>`).join('');
+  const cloned = cat.cloned || [];
+  const mine = cloned.length ? `<optgroup label="Your voices">${cloned.map(v => `<option value="${esc(v.id)}">${esc(v.name)}${v.gender ? ' — ' + esc(v.gender.toLowerCase()) : ''}</option>`).join('')}</optgroup>` : '';
+  $('#voice').innerHTML = mine + grouped + '<option value="__add">＋ Add a voice from a recording…</option>';
+  if (keep && keep !== '__add') setSelect($('#voice'), keep);
+  $('#blendVoice').innerHTML = '<option value="">— none —</option>' + grouped;
+  const tagNames = [...cloned.map(v => v.name), ...cat.voices.map(v => v.name)];
+  $('#voiceTag').innerHTML = '<option value="">Voice…</option>' + tagNames.map(n => `<option value="${esc(n.toLowerCase())}">${esc(n)}</option>`).join('');
+  updateVoiceMode();
+}
+let lastVoice = 'af_heart';
+function updateVoiceMode() {
+  const v = $('#voice').value, clone = v.startsWith('clone:');
+  $('#cloneOpts').hidden = !clone; $('#kokoroOpts').hidden = clone;
+  if (v !== '__add') lastVoice = v;
+  $('#variationOut').textContent = String((state.variation || 0) + 1);
+}
+$('#voice').addEventListener('change', () => {
+  if ($('#voice').value === '__add') { setSelect($('#voice'), lastVoice); openVoices(); return; }
+  updateVoiceMode();
+});
+$('#newRead').onclick = () => { state.variation = ((state.variation || 0) + 1) % 10000; updateVoiceMode(); changed(); render(); };
+
+function openVoices() {
+  renderCloneList();
+  $('#cloneMsg').textContent = ''; $('#cloneMsg').className = 'msg';
+  $('#voiceDialog').showModal();
+}
+$('#openVoices').onclick = openVoices;
+function renderCloneList() {
+  const st = state.catalog?.cloning || {}, list = state.catalog?.cloned || [];
+  $('#cloneEngine').innerHTML = st.installed
+    ? '<span class="led on"></span> Cloning engine installed.'
+    : '<span class="led err"></span> Cloning engine not installed yet. You can add voices now, but to <b>use</b> them, stop the studio, run <span class="mono">./setup-cloning.sh</span> once, then start it again.';
+  $('#cloneList').innerHTML = list.length ? list.map(v => `
+    <div class="clone-row">
+      <button type="button" class="icon-btn" data-sample="${esc(v.slug)}" title="Play the recording" aria-label="Play ${esc(v.name)}'s recording">▷</button>
+      <div><b>${esc(v.name)}</b> <span class="muted">${v.gender ? esc(v.gender.toLowerCase()) + ' · ' : ''}${v.seconds ?? '?'}s</span></div>
+      <button type="button" class="link-btn" data-use="${esc(v.id)}">Use</button>
+      <button type="button" class="link-btn danger" data-remove="${esc(v.slug)}">Delete</button>
+    </div>`).join('') : '<p class="muted">No voices yet.</p>';
+  $$('#cloneList [data-sample]').forEach(b => b.onclick = () => { const a = new Audio(`/api/voices/clone/${b.dataset.sample}/sample`); a.play().catch(() => {}); });
+  $$('#cloneList [data-use]').forEach(b => b.onclick = () => { setSelect($('#voice'), b.dataset.use); updateVoiceMode(); changed(); $('#voiceDialog').close(); });
+  $$('#cloneList [data-remove]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this voice? Takes already rendered are kept.')) return;
+    try { await api('/api/voices/clone/' + b.dataset.remove, {method: 'DELETE'}); await refreshCatalog(); renderCloneList(); }
+    catch (err) { toast(err.message); }
+  });
+}
+async function refreshCatalog() {
+  const cat = await api('/api/voices');
+  state.catalog = {...state.catalog, ...cat};
+  renderVoiceOptions();
+}
+$('#cloneForm').addEventListener('submit', async e => {
+  if (e.submitter && e.submitter.value === 'close') return;
+  e.preventDefault();
+  const form = $('#cloneForm'), m = $('#cloneMsg');
+  if (!form.reportValidity()) return;
+  const data = new FormData(form);
+  $('#cloneSubmit').disabled = true; m.className = 'msg'; m.textContent = 'Preparing the recording…';
+  try {
+    const r = await fetch('/api/voices/clone', {method: 'POST', body: data});
+    const j = await r.json().catch(() => ({error: `Upload failed (${r.status})`}));
+    if (!r.ok) throw Error(j.error || 'Upload failed');
+    await refreshCatalog();
+    setSelect($('#voice'), j.voice.id); updateVoiceMode(); changed();
+    form.reset(); renderCloneList();
+    m.className = 'msg ok';
+    m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.' : ' Run ./setup-cloning.sh to start using it.');
+  } catch (err) { m.className = 'msg error'; m.textContent = err.message; }
+  finally { $('#cloneSubmit').disabled = false; }
+});
+
 /* ---------- startup ---------- */
 async function init() {
   try {
     const [status, cat] = await Promise.all([api('/api/status'), api('/api/voices')]);
     state.catalog = cat; state.ffmpeg = status.ffmpeg;
     cat.styles.forEach(s => { state.styles[s.id] = s; });
-    const opt = v => `<option value="${esc(v.id)}">${esc(v.name)} — ${v.accent === 'British' ? 'UK' : 'US'} ${v.gender.toLowerCase()}</option>`;
-    const groups = [['American', 'Female'], ['American', 'Male'], ['British', 'Female'], ['British', 'Male']];
-    const grouped = groups.map(([a, g]) => `<optgroup label="${a === 'British' ? 'UK' : 'US'} · ${g.toLowerCase()}">${cat.voices.filter(v => v.accent === a && v.gender === g).map(opt).join('')}</optgroup>`).join('');
-    $('#voice').innerHTML = grouped;
-    $('#blendVoice').innerHTML = '<option value="">— none —</option>' + grouped;
-    $('#voiceTag').innerHTML = '<option value="">Voice…</option>' + cat.voices.map(v => `<option value="${esc(v.name.toLowerCase())}">${esc(v.name)}</option>`).join('');
+    renderVoiceOptions();
     $('#preset').innerHTML = Object.entries(cat.presets).map(([k, p]) => `<option value="${k}">${esc(p.label)}</option>`).join('');
     buildEmotionUI();
     if (!status.ffmpeg) { $('#mp3').disabled = true; $('#mp3').parentElement.title = 'Install ffmpeg to enable MP3 export'; }
@@ -733,5 +817,10 @@ async function init() {
   }
   paintWave();
 }
+$('#toVideo').onclick = () => { if (state.take) window.KVideo?.addTake(state.take); };
+
+// Shared helpers for the video editor (static/video.js).
+window.KStudio = {api, toast, esc, show, COLORS, styles: () => state.styles, refreshCount, fmtShort};
+
 init();
 })();

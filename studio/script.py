@@ -83,6 +83,8 @@ def apply_pronunciations(text, rules, resolve=None):
         if not word or not say or len(word) > 60 or len(say) > 160:
             continue
         pattern = re.compile(r'(?<![\w\[])' + re.escape(word) + r'(?![\w\]])', re.I)
+        if not pattern.search(text):
+            continue
         ps = resolve(say) if resolve else None
         if ps is None and len(say) > 2 and say.startswith('/') and say.endswith('/'):
             ps = normalize_ipa(say)
@@ -114,6 +116,35 @@ def prepare_speech(sentence, rules=None, resolve=None, heteronyms=True):
     if heteronyms:
         text = fix_heteronyms(text)
     return apply_emphasis(text)
+
+
+def _plain_say(say, hint=''):
+    """A rule's pronunciation as readable text (for engines that read text, not phonemes)."""
+    say = str(say or '').strip()
+    if len(say) > 2 and say.startswith('/') and say.endswith('/'):
+        say = str(hint or '').strip()
+        if not say:
+            return None
+    return say.lower() if '-' in say else say
+
+
+def prepare_plain(sentence, rules=None):
+    """Text for cloned (Chatterbox) voices: respellings instead of phonemes."""
+    def link(m):
+        word, f = m.group(1), m.group(2).strip()
+        if re.fullmatch(r'[+-]?\d+(\.5)?|#.*#', f) or f.startswith('/'):
+            return word
+        return _plain_say(f) or word
+    text = LINK_RE.sub(link, sentence)
+    for rule in rules or []:
+        word = str(rule.get('word', '')).strip()
+        say = _plain_say(rule.get('say', ''), rule.get('hint', ''))
+        if not word or not say or len(word) > 60 or len(say) > 160:
+            continue
+        pattern = re.compile(r'(?<![\w\[])' + re.escape(word) + r'(?![\w\]])', re.I)
+        text = pattern.sub(lambda _m, say=say: say, text)
+    text = EMPHASIS_RE.sub(lambda m: m.group(1), text)
+    return ' '.join(text.split())
 
 
 def apply_emphasis(text):
@@ -155,7 +186,8 @@ def parse_script(source, voices=None, pronunciations=None, resolve=None, heteron
                 if not re.search(r'\w', shown):
                     continue
                 speak = prepare_speech(sentence, pronunciations, resolve, heteronyms)
-                items.append({'kind': 'speech', 'text': shown, 'speak': speak, **state})
+                items.append({'kind': 'speech', 'text': shown, 'speak': speak,
+                              'plain': prepare_plain(sentence, pronunciations), **state})
             if i < len(paragraphs) - 1:
                 items.append({'kind': 'pause', 'ms': None, 'para': True})
 
