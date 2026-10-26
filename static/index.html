@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Kokoro Studio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">Kokoro<span>Studio</span></div>
+  <nav class="tabs" aria-label="Views">
+    <button class="tab active" data-view="script">Script</button>
+    <button class="tab" data-view="takes">Takes <span class="count" id="takeCount"></span></button>
+    <button class="tab" data-view="guide">Guide</button>
+  </nav>
+  <div class="status">
+    <span class="led" id="led" role="img" aria-label="Engine status"></span>
+    <span id="engineText">Connecting to engine…</span>
+    <span class="sep">·</span>
+    <span id="deviceText" class="muted">—</span>
+    <button class="icon-btn" id="themeBtn" title="Switch light / dark" aria-label="Switch light or dark theme"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M7 1a6 6 0 0 1 0 12z" fill="currentColor"/></svg></button>
+  </div>
+</header>
+
+<main>
+<!-- ============ SCRIPT ============ -->
+<section class="view active" id="view-script">
+  <div class="workspace">
+    <section class="editor" aria-label="Script">
+      <div class="doc-head">
+        <input id="projectName" class="title-input" placeholder="Untitled script" maxlength="80" aria-label="Project name">
+        <div class="file-actions">
+          <button class="link-btn" id="importBtn">Import</button>
+          <button class="link-btn" id="exportBtn">Save project</button>
+          <button class="link-btn" id="sampleBtn">Sample</button>
+          <button class="link-btn" id="clearBtn">Clear</button>
+        </div>
+      </div>
+
+      <div class="tagbar" role="toolbar" aria-label="Insert direction">
+        <span class="tagbar-label">Insert</span>
+        <div class="tag-chips" id="tagChips"></div>
+        <span class="divider"></span>
+        <button class="chip" data-insert="[pause=600] " title="Silence (ms)">Pause</button>
+        <button class="chip" data-insert="[beat] " title="Short dramatic beat (350 ms)">Beat</button>
+        <button class="chip" id="emphasisBtn" title="Emphasise the selected words">*Emphasis*</button>
+        <button class="chip" data-insert="[default] " title="Back to the panel's delivery">Default</button>
+        <select class="chip-select" id="voiceTag" aria-label="Insert voice change"><option value="">Voice…</option></select>
+      </div>
+
+      <div class="paper">
+        <div class="backdrop" id="backdrop" aria-hidden="true"></div>
+        <textarea id="script" spellcheck="true" aria-label="Script text"
+          placeholder="Write or paste your script.&#10;&#10;Put a direction like [sad] or [excited] before a line to change how it is read. Blank lines become paragraph pauses."></textarea>
+      </div>
+
+      <div class="timeline" aria-label="Estimated timeline">
+        <div class="timeline-head">
+          <span>Timeline <span class="muted">(estimate)</span></span>
+          <span id="estimate" class="mono">0:00</span>
+        </div>
+        <div class="segbar" id="segbar"></div>
+      </div>
+
+      <div class="doc-foot">
+        <span id="count" class="muted">0 words</span>
+        <span id="warnings" class="warn"></span>
+        <span class="grow"></span>
+        <button class="btn ghost" id="auditionBtn" title="Hear the selected text (or the line at the cursor) with the current direction">Preview line</button>
+        <span class="muted kbd-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> renders</span>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-label="Direction">
+      <section class="group">
+        <h2>Voice</h2>
+        <div class="row">
+          <select id="voice" class="input" aria-label="Voice"></select>
+        </div>
+        <div class="row two">
+          <label class="mini">Blend with
+            <select id="blendVoice" class="input"><option value="">— none —</option></select>
+          </label>
+          <label class="mini">Blend type
+            <span class="seg-toggle" role="radiogroup" aria-label="Blend type">
+              <button type="button" data-blend-mode="full" aria-pressed="true">Voice</button>
+              <button type="button" data-blend-mode="delivery" aria-pressed="false" title="Keep your voice's tone, borrow the other voice's rhythm and melody">Delivery</button>
+            </span>
+          </label>
+        </div>
+        <div class="slider" id="blendRow" hidden>
+          <label for="blend">Blend amount</label><output id="blendOut"></output>
+          <input type="range" id="blend" min="0.05" max="0.7" step="0.05" value="0.3">
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Emotion <span class="muted h-note">default for untagged lines</span></h2>
+        <div class="emotion">
+          <div class="gauge" id="gauge" role="slider" tabindex="0" aria-label="Emotion intensity"
+               aria-valuemin="0" aria-valuemax="120" aria-valuenow="60">
+            <svg viewBox="0 0 240 140" id="gaugeSvg" aria-hidden="true"></svg>
+            <div class="gauge-read"><span id="gaugeValue" class="mono">60</span><small id="gaugeZone">natural</small></div>
+          </div>
+          <div class="emo-grid" id="emoGrid"></div>
+        </div>
+        <div class="readout mono" id="readout"></div>
+        <button class="btn ghost wide" id="auditionEmotion">Hear this emotion</button>
+      </section>
+
+      <section class="group">
+        <h2>Delivery</h2>
+        <div class="slider"><label for="speed">Pace</label><output id="speedOut"></output>
+          <input type="range" id="speed" min="0.6" max="1.6" step="0.01" value="1"></div>
+        <div class="slider"><label for="pitch">Pitch</label><output id="pitchOut"></output>
+          <input type="range" id="pitch" min="-4" max="4" step="0.1" value="0"></div>
+        <div class="slider"><label for="range">Expressiveness</label><output id="rangeOut"></output>
+          <input type="range" id="range" min="0.4" max="1.8" step="0.01" value="1"></div>
+        <div class="slider"><label for="energy">Vocal energy</label><output id="energyOut"></output>
+          <input type="range" id="energy" min="-1" max="1" step="0.05" value="0"></div>
+        <div class="slider"><label for="punct">Comma &amp; stop pauses</label><output id="punctOut"></output>
+          <input type="range" id="punct" min="0.5" max="2.5" step="0.05" value="1"></div>
+        <div class="slider"><label for="sentence_gap">Between sentences</label><output id="sentence_gapOut"></output>
+          <input type="range" id="sentence_gap" min="0" max="1500" step="10" value="300"></div>
+        <div class="slider"><label for="paragraph_gap">Between paragraphs</label><output id="paragraph_gapOut"></output>
+          <input type="range" id="paragraph_gap" min="0" max="3000" step="25" value="700"></div>
+      </section>
+
+      <section class="group">
+        <h2>Output</h2>
+        <label class="mini">Made for
+          <select id="preset" class="input"></select>
+        </label>
+        <div class="row two">
+          <label class="mini">Loudness
+            <select id="lufs" class="input">
+              <option value="-14">−14 LUFS · streaming</option>
+              <option value="-16" selected>−16 LUFS · web / podcast</option>
+              <option value="-19">−19 LUFS · mobile quiet</option>
+              <option value="-20">−20 LUFS · audiobook</option>
+              <option value="-23">−23 LUFS · broadcast</option>
+              <option value="off">Off · raw level</option>
+            </select>
+          </label>
+          <label class="mini">Sample rate
+            <select id="rate" class="input">
+              <option value="48000" selected>48 kHz · video</option>
+              <option value="44100">44.1 kHz · music/podcast</option>
+              <option value="24000">24 kHz · native</option>
+            </select>
+          </label>
+        </div>
+        <div class="row two">
+          <label class="mini">Peak ceiling
+            <select id="peak" class="input">
+              <option value="-1" selected>−1 dBTP</option>
+              <option value="-2">−2 dBTP</option>
+              <option value="-3">−3 dBTP</option>
+            </select>
+          </label>
+          <label class="mini">Fit to length <span class="muted">(m:ss)</span>
+            <input id="target" class="input mono" placeholder="off" inputmode="numeric" autocomplete="off">
+          </label>
+        </div>
+        <div class="checks">
+          <label><input type="checkbox" id="polish" checked> Voice polish <span class="muted">(rumble cut, light compression)</span></label>
+          <label><input type="checkbox" id="room_tone"> Room tone <span class="muted">(no dead-silent gaps)</span></label>
+          <label><input type="checkbox" id="mp3"> Also export MP3</label>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>Pronunciation <span class="muted h-note">applies to every take</span></h2>
+        <div id="pronList" class="pron-list"></div>
+        <button class="btn ghost wide" id="addPron">Add word</button>
+        <p class="note">Write how it should sound (<span class="mono">SQL → sequel</span>) or give phonemes between slashes (<span class="mono">/kˈOkəɹO/</span>).</p>
+      </section>
+
+      <button class="link-btn reset" id="resetBtn">Reset direction to defaults</button>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ TAKES ============ -->
+<section class="view" id="view-takes">
+  <div class="page">
+    <div class="page-head">
+      <h1>Takes</h1>
+      <p class="muted">Everything you render is kept in the <span class="mono">outputs/</span> folder next to the app.</p>
+      <button class="btn ghost" id="refreshTakes">Refresh</button>
+    </div>
+    <div id="takeList" class="take-list"></div>
+  </div>
+</section>
+
+<!-- ============ GUIDE ============ -->
+<section class="view" id="view-guide">
+  <div class="page prose">
+    <h1>Directing the read</h1>
+    <p>Kokoro has no emotion switch of its own. This studio reshapes the voice's melody, pace, energy and pauses inside the model before audio is made, so emotions stay clean instead of sounding processed. Small moves sound the most human.</p>
+
+    <h2>Directions</h2>
+    <table class="ref">
+      <tr><td class="mono">[sad]</td><td>Read what follows with this emotion until the next direction.</td></tr>
+      <tr><td class="mono">[excited:40]</td><td>Same, at 40% strength. The gauge sets strength for lines without a number.</td></tr>
+      <tr><td class="mono">[default]</td><td>Back to the emotion picked in the side panel.</td></tr>
+      <tr><td class="mono">[pause=800]</td><td>Silence in milliseconds. <span class="mono">[pause=1.5s]</span> also works.</td></tr>
+      <tr><td class="mono">[beat]</td><td>A short 350 ms pause, for timing a punchline or a cut.</td></tr>
+      <tr><td class="mono">[voice=george]</td><td>Switch speaker for dialogue. <span class="mono">[voice=default]</span> switches back.</td></tr>
+      <tr><td class="mono">[speed=1.1]</td><td>Speed up or slow down the following text relative to the Pace slider.</td></tr>
+      <tr><td class="mono">*word*</td><td>Lean on a word.</td></tr>
+      <tr><td class="mono">[Kokoro](/kˈOkəɹO/)</td><td>Exact pronunciation using Kokoro's phoneme notation.</td></tr>
+    </table>
+    <p>Emotions: neutral, warm, joyful, excited, curious, confident, calm, sad, angry, fearful, dramatic, soft.</p>
+
+    <h2>Writing for video</h2>
+    <ul>
+      <li><strong>One idea per sentence.</strong> Each sentence is rendered and timed separately, which keeps captions readable and makes the timing easy to cut to.</li>
+      <li><strong>Use blank lines for scene changes.</strong> They become paragraph pauses, which you can lengthen for B-roll.</li>
+      <li><strong>Use <span class="mono">[beat]</span> before reveals.</strong> It's shorter than a paragraph pause and lands well before a cut.</li>
+      <li><strong>Fit to length</strong> re-paces the read to hit an exact duration, e.g. <span class="mono">0:30</span> for an ad slot. Pauses are adjusted first, then pace.</li>
+      <li><strong>Captions</strong> (SRT and VTT) are written with every take, timed from the model's own word timings. Drop them straight into Premiere, Resolve, CapCut or YouTube.</li>
+      <li><strong>Loudness:</strong> −14 LUFS for YouTube and social, −16 for general web, −23 for broadcast. If you're mixing music under the voice, pick −16 and turn the music down, not the voice.</li>
+      <li><strong>Room tone</strong> stops gaps going dead-silent, so edits in your timeline don't sound like cuts.</li>
+    </ul>
+
+    <h2>Getting natural results</h2>
+    <ul>
+      <li>Kokoro sounds best on full sentences. Very short lines are merged with their neighbour.</li>
+      <li>Punctuation carries the performance: commas for breath, ellipses for hesitation, question marks for lift.</li>
+      <li>Keep intensity in the green zone of the gauge for narration. The red zone is for characters and comedy.</li>
+      <li>Blend type <em>Delivery</em> keeps your voice's tone but borrows another voice's rhythm and melody, which is a quick way to get a different read from the same speaker.</li>
+    </ul>
+
+    <h2>Shortcuts</h2>
+    <table class="ref">
+      <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>Render take</td></tr>
+      <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>Preview the line at the cursor</td></tr>
+      <tr><td><kbd>Space</kbd> (outside the editor)</td><td>Play / pause</td></tr>
+    </table>
+  </div>
+</section>
+</main>
+
+<footer class="transport" aria-label="Transport">
+  <button class="render-btn" id="renderBtn"><span class="rec-dot" aria-hidden="true"></span><span id="renderLabel">Render</span></button>
+  <button class="icon-btn play" id="playBtn" aria-label="Play" disabled>▶</button>
+  <div class="clock mono"><span id="tCur">0:00.0</span><span class="muted"> / </span><span id="tDur">0:00.0</span></div>
+  <div class="wave-wrap">
+    <canvas id="wave" aria-label="Waveform, click to seek"></canvas>
+    <div class="now-line" id="nowLine"></div>
+  </div>
+  <div class="meter mono" id="meter" title="Measured loudness / true peak">— LUFS</div>
+  <div class="exports" id="exports">
+    <a class="ex" id="dlWav" aria-disabled="true">WAV</a>
+    <a class="ex" id="dlMp3" aria-disabled="true">MP3</a>
+    <a class="ex" id="dlSrt" aria-disabled="true">SRT</a>
+    <a class="ex" id="dlVtt" aria-disabled="true">VTT</a>
+  </div>
+  <div class="msg" id="msg" role="status" aria-live="polite"></div>
+</footer>
+
+<audio id="audio" preload="auto"></audio>
+<input type="file" id="fileInput" accept=".txt,.md,.json,text/plain,application/json" hidden>
+<div class="toast" id="toast" role="alert"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
