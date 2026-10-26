@@ -1,0 +1,216 @@
+"""Tests that run without Kokoro weights. `pytest -q` from the project folder."""
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from studio import audio as fx  # noqa: E402
+from studio import captions as cc  # noqa: E402
+from studio.engine import VOICE_NAMES, Engine, read_settings  # noqa: E402
+from studio.script import apply_emphasis, apply_pronunciations, parse_script, split_sentences  # noqa: E402
+from studio.styles import STYLES, blend_style, canonical_style  # noqa: E402
+from fakes import FakePipeline  # noqa: E402
+
+
+# ---------- script notation ----------
+def test_parse_tags_pauses_and_paragraphs():
+    items, warnings = parse_script('[dramatic] Hello there, old friend. [pause=800] [joyful:40] I am so happy!\n\nHello again, everyone.')
+    kinds = [i['kind'] for i in items]
+    assert kinds == ['speech', 'pause', 'speech', 'pause', 'speech'], items
+    assert items[0]['style'] == 'dramatic' and items[2]['style'] == 'joyful'
+    assert items[2]['intensity'] == pytest.approx(0.4)
+    assert items[1]['ms'] == 800 and items[3].get('para')
+    assert items[4]['style'] == 'joyful'
+    assert not warnings
+
+
+def test_parse_voice_speed_default_and_unknown():
+    items, warnings = parse_script('[sad] One line here. [voice=george] [speed=1.2] Second line here. [default] [voice=default] Third line here. [laughs] ok then',
+                                   VOICE_NAMES)
+    speech = [i for i in items if i['kind'] == 'speech']
+    assert speech[0]['style'] == 'sad' and speech[0]['voice'] is None
+    assert speech[1]['voice'] == 'bm_george' and speech[1]['speed'] == pytest.approx(1.2)
+    assert speech[2]['style'] is None and speech[2]['voice'] is None
+    assert any('laughs' in w for w in warnings)
+    assert 'laughs' not in ' '.join(s['speak'] for s in speech)
+
+
+def test_pause_formats_and_limits():
+    assert parse_script('[pause=1.5s] hi there friend')[0][0]['ms'] == 1500
+    assert parse_script('[pause=99999] hi there friend')[0][0]['ms'] == 10000
+    assert parse_script('[beat] hi there friend')[0][0]['ms'] == 350
+
+
+def test_old_style_names_still_work():
+    assert canonical_style('tender') == 'warm' and canonical_style('whisper') == 'soft'
+    items, _ = parse_script('[whisper] Keep your voice down please.')
+    assert items[0]['style'] == 'soft'
+
+
+def test_sentences_respect_abbreviations_and_merge_fragments():
+    s = split_sentences('Dr. Smith arrived at 9 a.m. today. Yes. Then we left for the station. It was late.')
+    assert s[0].startswith('Dr. Smith arrived')
+    assert any('Yes.' in x for x in s) and 'Yes.' not in s
+    assert len(s) == 3
+
+
+def test_phoneme_links_pass_through_and_emphasis():
+    items, warnings = parse_script('Say [Kokoro](/kˈOkəɹO/) with me, *really* loudly now.')
+    assert not warnings
+    assert '[Kokoro](/kˈOkəɹO/)' in items[0]['speak']
+    assert '[really](+2)' in items[0]['speak']
+    assert items[0]['text'] == 'Say Kokoro with me, really loudly now.'
+    assert apply_emphasis('*two words*') == '[two](+2) [words](+2)'
+
+
+def test_pronunciation_rules():
+    rules = [{'word': 'SQL', 'say': 'sequel'}, {'word': 'Kokoro', 'say': '/kˈOkəɹO/'}]
+    out = apply_pronunciations('Learn SQL and sql with Kokoro, not NoSQL.', rules)
+    assert out == 'Learn sequel and sequel with [Kokoro](/kˈOkəɹO/), not NoSQL.'
+
+
+# ---------- emotion model ----------
+def test_blend_style_scales_toward_neutral():
+    zero = blend_style('sad', 0)
+    assert zero['speed'] == pytest.approx(1) and zero['pitch'] == 0 and zero['range'] == pytest.approx(1)
+    full = blend_style('sad', 1)
+    assert full['speed'] == pytest.approx(STYLES['sad']['speed'])
+    half = blend_style('sad', 0.5)
+    assert 1 > half['speed'] > full['speed'] and full['pitch'] < half['pitch'] < 0
+
+
+# ---------- audio chain ----------
+def test_loudness_matches_bs1770_reference():
+    for sr in (24000, 48000):
+        t = np.arange(sr * 4) / sr
+        assert fx.loudness(np.sin(2 * np.pi * 997 * t), sr) == pytest.approx(-3.01, abs=0.05)
+
+
+def test_finish_hits_target_and_ceiling():
+    rng = np.random.default_rng(3)
+    y = (rng.standard_normal(24000 * 8) * 0.05).astype(np.float32)
+    y[24000:24100] = 0.95  # a spike the limiter must catch
+    out, rate, report = fx.finish(y, rate=48000, lufs=-14, peak_db=-1)
+    assert rate == 48000 and len(out) == len(y) * 2
+    assert report['lufs'] == pytest.approx(-14, abs=0.6)
+    assert report['true_peak'] <= -0.9
+
+
+def test_trim_reports_offset():
+    y = np.zeros(24000, dtype=np.float32)
+    y[6000:12000] = 0.3
+    out, cut = fx.trim(y)
+    assert 5000 < cut < 6000 and len(out) < 9000
+
+
+# ---------- captions ----------
+def test_word_merge_and_cues():
+    class T:
+        def __init__(self, text, ws, s, e):
+            self.text, self.whitespace, self.start_ts, self.end_ts = text, ws, s, e
+    toks = [T('I', ' ', 0.0, 0.1), T('do', '', 0.1, 0.3), T("n't", '', 0.3, 0.4), T(',', ' ', None, None), T('know', '', 0.5, 0.8), T('.', '', None, None)]
+    words = cc.words_from_tokens(toks, offset_s=1.0)
+    assert [w['w'] for w in words] == ['I', "don't,", 'know.']
+    assert words[0]['start'] == pytest.approx(1.0) and words[2]['end'] == pytest.approx(1.8)
+    long = [{'w': f'word{i}', 'start': i * 0.3, 'end': i * 0.3 + 0.25} for i in range(40)]
+    cues = cc.build_cues([{'words': long}])
+    assert len(cues) > 1
+    assert all(len(line) <= cc.MAX_LINE for c in cues for line in c['text'].split('\n'))
+    srt = cc.to_srt(cues)
+    assert srt.startswith('1\n00:00:00,000 --> ') and cc.to_vtt(cues).startswith('WEBVTT')
+
+
+# ---------- engine end to end (fake model) ----------
+@pytest.fixture
+def engine(tmp_path):
+    e = Engine(tmp_path)
+    e.patched = True
+    e.pipelines['a'] = FakePipeline('a')
+    e.pipelines['b'] = FakePipeline('b')
+    return e
+
+
+def test_guards():
+    with pytest.raises(ValueError):
+        read_settings({'voice': 'nope'})
+    with pytest.raises(ValueError):
+        read_settings({'style': 'nope'})
+
+
+def test_synthesize_writes_take_with_captions(engine, tmp_path):
+    meta = engine.synthesize({'text': '[sad] Such a loss for all of us. [pause=250] [joyful] Welcome back, my friend!\n\n[voice=george] Good to be home again.',
+                              'voice': 'af_heart', 'style': 'neutral', 'intensity': 80, 'rate': 48000, 'lufs': -16})
+    wav = tmp_path / f'{meta["id"]}.wav'
+    y, sr = sf.read(wav)
+    assert sr == 48000 and len(y) / sr == pytest.approx(meta['seconds'], abs=0.01)
+    assert meta['lufs'] == pytest.approx(-16, abs=0.8)
+    assert [s['style'] for s in meta['segments']] == ['sad', 'joyful', 'joyful']
+    assert meta['segments'][2]['voice'] == 'bm_george'
+    assert engine.pipelines['b'].calls, 'UK voice should use the British pipeline'
+    sad_call = engine.pipelines['a'].calls[0]
+    assert sad_call['shape'].pitch < 0 and sad_call['shape'].range < 1 and sad_call['speed'] < 1
+    srt = (tmp_path / f'{meta["id"]}.srt').read_text()
+    assert 'Such a loss' in srt and 'Good to be home again.' in srt
+    saved = json.loads((tmp_path / f'{meta["id"]}.json').read_text())
+    assert saved['text'].startswith('[sad]') and saved['captions'] >= 3
+    # Segment times are ordered and inside the take.
+    starts = [s['start'] for s in meta['segments']]
+    assert starts == sorted(starts) and meta['segments'][-1]['end'] <= meta['seconds'] + 0.05
+
+
+def test_explicit_pause_is_exact(engine):
+    meta = engine.synthesize({'text': 'First sentence is here. [pause=1000] Second sentence is here.', 'lufs': 'off', 'polish': False, 'rate': 24000})
+    a, b = meta['segments']
+    assert b['start'] - a['end'] == pytest.approx(1.0, abs=0.01)
+
+
+def test_fit_to_duration(engine):
+    text = 'One two three four five. Six seven eight nine ten.\n\nEleven twelve thirteen fourteen. Fifteen sixteen seventeen.'
+    loose = engine.synthesize({'text': text, 'target_seconds': 9.0, 'rate': 24000})
+    assert loose['seconds'] == pytest.approx(9.0, abs=0.15)
+    tight = engine.synthesize({'text': text, 'target_seconds': 4.5, 'rate': 24000})
+    assert tight['fit']['passes'] == 2 and tight['seconds'] == pytest.approx(4.5, abs=0.4)
+
+
+def test_voice_blend_keys(engine):
+    pytest.importorskip('torch')
+    engine.synthesize({'text': 'Blend these two voices nicely.', 'voice': 'af_heart', 'blend_voice': 'af_bella',
+                       'blend': 0.4, 'blend_mode': 'delivery'})
+    pipe = engine.pipelines['a']
+    key = pipe.calls[-1]['voice']
+    assert key.startswith('af_heart+af_bella@0.40:delivery')
+    mix, base, other = pipe.voices[key], pipe.voices['af_heart'], pipe.voices['af_bella']
+    assert (mix[..., :128] == base[..., :128]).all()
+    assert np.allclose(mix[..., 128:].numpy(), (base[..., 128:] * 0.6 + other[..., 128:] * 0.4).numpy(), atol=1e-6)
+
+
+def test_preview_returns_wav_bytes(engine, tmp_path):
+    data, info = engine.synthesize({'text': '[excited] Preview this quick line now.', 'rate': 24000}, save=False)
+    assert data[:4] == b'RIFF' and info['seconds'] > 0.5
+    assert not list(tmp_path.glob('*.wav'))
+
+
+# ---------- flask routes ----------
+def test_routes(engine, tmp_path, monkeypatch):
+    pytest.importorskip('flask')
+    import app as server
+    monkeypatch.setattr(server, 'engine', engine)
+    monkeypatch.setattr(server, 'OUT', tmp_path)
+    client = server.app.test_client()
+    assert client.get('/api/voices').get_json()['styles'][0]['id'] == 'neutral'
+    assert client.get('/', headers={'Host': 'evil.example:8765'}).status_code == 403
+    r = client.post('/api/generate', json={'text': 'Hello from the test suite, friend.', 'mp3': False})
+    rec = r.get_json()['recording']
+    assert client.get(rec['audio_url']).status_code == 200
+    assert client.get(rec['srt_url']).data.startswith(b'1\n')
+    assert len(client.get('/api/recordings').get_json()['recordings']) == 1
+    assert client.post('/api/preview', json={'text': 'Short preview line here.'}).mimetype == 'audio/wav'
+    assert client.delete(f'/api/recordings/{rec["id"]}').status_code == 200
+    assert client.get(rec['audio_url']).status_code == 404
+    assert client.post('/api/generate', data='x').status_code == 415
