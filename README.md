@@ -107,6 +107,34 @@ Pick a second voice under *Blend with*.
 - **Voice** mixes the two timbres.
 - **Delivery** keeps your voice's sound but borrows the other voice's rhythm and melody. Kokoro's style vector stores timbre and prosody separately, so only the prosody half is mixed.
 
+### Your own voices (voice cloning)
+
+Built-in Kokoro voices can't be changed into a different person, so the studio can also make a voice from a recording of a real speaker. This uses [Chatterbox](https://github.com/resemble-ai/chatterbox) by Resemble AI (MIT licence), which runs locally. A clone captures the speaker's sound, accent and way of speaking.
+
+**One-time setup** (stop the studio first):
+
+```bash
+./setup-cloning.sh
+```
+
+This creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro. It also downloads the model. Plan for about 6 GB of packages plus about 3 GB of model; the download is safe to rerun if it's interrupted. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
+
+**Adding a voice:** in the Voice panel, choose **Add a voice from a recording…**
+
+- Upload 10–30 seconds of one person speaking naturally, in a quiet room with no music.
+- The studio finds the cleanest 10 seconds and builds the voice from those.
+- Only use your own voice, or a voice whose owner has given you permission.
+
+Cloned voices appear under *Your voices*. They also work in dialogue with `[voice=Marcus]`.
+
+**What works with cloned voices:**
+- Scripts, pauses, captions, loudness and the Hebrew name pack. For cloned voices, pronunciations use the sounds-like spelling, e.g. *yah-hoo-ah*.
+- Emotion buttons and the gauge set Chatterbox's emotion strength.
+- Pace is approximate.
+- Each read varies slightly; **Try another read** re-renders with a different take.
+
+Recordings stay in `voices/`, which is not committed to git. Chatterbox adds an inaudible watermark to its output, as its authors intend.
+
 ### Output presets
 
 *Made for* sets loudness, sample rate and pacing for YouTube narration, explainers, documentary, Shorts/Reels/TikTok, ads, podcasts, broadcast (EBU R128) and audiobooks. Everything stays editable afterwards.
@@ -131,6 +159,7 @@ Your current draft and theme are kept in this browser's local storage so a refre
 - `studio/phonemes.py`: sounds-like respelling, IPA clean-up, Hebrew name pack, *live* fix
 - `studio/audio.py`: loudness (ITU BS.1770), limiter, polish, room tone
 - `studio/captions.py`: SRT/VTT builder
+- `studio/cloning.py`, `cloning/chatterbox_worker.py`, `setup-cloning.sh`: cloned voices (Chatterbox in its own environment)
 - `static/`: the web UI
 - `tests/`: `pip install -r requirements-dev.txt && pytest -q`. The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
 

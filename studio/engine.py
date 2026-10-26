@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import soundfile as sf
 
 from . import audio as fx
 from . import captions as cc
+from .cloning import CLONE_PREFIX, CloneWorker, VoiceLibrary
 from .phonemes import PACKS, make_resolver
 from .prosody import Shape, patch_model, shaping
 from .script import parse_script
@@ -59,6 +61,10 @@ VOICES = {
 }
 VOICE_NAMES = {k: v[0] for k, v in VOICES.items()}
 
+# Chatterbox "exaggeration" at full emotion strength (0.5 = its neutral read).
+CLONE_EXPR = {'neutral': 0.5, 'warm': 0.55, 'joyful': 0.8, 'excited': 1.1, 'curious': 0.65, 'confident': 0.65,
+              'calm': 0.35, 'sad': 0.45, 'angry': 1.0, 'fearful': 0.8, 'dramatic': 0.9, 'soft': 0.3}
+
 
 def bounded(value, lower, upper, fallback):
     try:
@@ -76,16 +82,16 @@ def _flag(value, default):
     return str(value).lower() in ('1', 'true', 'yes', 'on')
 
 
-def read_settings(payload):
-    """Validate and normalise request settings."""
+def read_settings(payload, cloned=()):
+    """Validate and normalise request settings. `cloned` = ids of cloned voices."""
     voice = payload.get('voice', 'af_heart')
-    if voice not in VOICES:
-        raise ValueError('Choose a supported Kokoro voice.')
+    if voice not in VOICES and voice not in cloned:
+        raise ValueError('That voice is not available. Pick another in the Voice panel.')
     style = canonical_style(payload.get('style', 'neutral'))
     if not style:
         raise ValueError('Choose a supported delivery style.')
     blend_voice = payload.get('blend_voice') or None
-    if blend_voice is not None and (blend_voice not in VOICES or blend_voice == voice):
+    if blend_voice is not None and (blend_voice not in VOICES or blend_voice == voice or voice not in VOICES):
         blend_voice = None
     lufs = payload.get('lufs', -16)
     lufs = None if lufs in (None, '', 'off') else bounded(lufs, -30, -8, -16)
@@ -115,13 +121,16 @@ def read_settings(payload):
         'mp3': _flag(payload.get('mp3'), False), 'target_seconds': target,
         'pronunciations': [r for r in rules[:500] if isinstance(r, dict)],
         'heteronyms': _flag(payload.get('heteronyms'), True),
+        'variation': int(bounded(payload.get('variation', 0), 0, 9999, 0)),
     }
 
 
 class Engine:
-    def __init__(self, out_dir):
+    def __init__(self, out_dir, voices_dir=None, cloner=None):
         self.out = Path(out_dir)
         self.out.mkdir(parents=True, exist_ok=True)
+        self.library = VoiceLibrary(voices_dir or self.out.parent / 'voices')
+        self.cloner = cloner or CloneWorker()
         self.model = None
         self.pipelines = {}
         self.patched = None
@@ -167,32 +176,53 @@ class Engine:
             pipe.voices[key] = mix
         return key
 
+    def read_settings(self, payload):
+        return read_settings(payload, cloned={v['id'] for v in self.library.list()})
+
+    def voice_names(self):
+        return {**VOICE_NAMES, **self.library.names()}
+
     def resolver(self, voice):
-        """Pronunciation resolver backed by Kokoro's own G2P for this accent."""
-        lang = voice[0]
-        try:
-            g2p = getattr(self.pipeline(lang), 'g2p', None)
-        except Exception:  # noqa: BLE001 - fall back to plain-text replacement
-            g2p = None
-        fn = (lambda t: g2p(t)[0]) if g2p is not None else None
-        return make_resolver(fn, british=(lang == 'b'))
+        """Pronunciation resolver backed by Kokoro's own G2P for this accent.
+
+        The Kokoro pipeline is only loaded if a rule actually needs it.
+        """
+        lang = voice[0] if voice in VOICES else 'a'
+        state = {}
+
+        def g2p(text):
+            if 'fn' not in state:
+                try:
+                    state['fn'] = getattr(self.pipeline(lang), 'g2p', None)
+                except Exception:  # noqa: BLE001 - fall back to plain-text replacement
+                    state['fn'] = None
+            return state['fn'](text)[0] if state['fn'] else None
+        return make_resolver(g2p, british=(lang == 'b'))
 
     def parse(self, text, cfg):
-        return parse_script(text, VOICE_NAMES, cfg['pronunciations'], self.resolver(cfg['voice']), cfg['heteronyms'])
+        return parse_script(text, self.voice_names(), cfg['pronunciations'], self.resolver(cfg['voice']),
+                            cfg['heteronyms'])
+
+    def catalog(self):
+        return {**public_catalog(), 'cloned': self.library.list(), 'cloning': self.cloner.status()}
 
     def phonemize(self, payload):
         """What Kokoro will actually read, sentence by sentence."""
         text = payload.get('text', '')
         if not isinstance(text, str) or not text.strip():
             raise ValueError('Nothing to phonemize.')
-        cfg = read_settings({**payload, 'text': text[:2000]})
+        cfg = self.read_settings({**payload, 'text': text[:2000]})
         out = []
         with self.lock:
             items, warnings = self.parse(text[:2000], cfg)
             for item in items:
                 if item['kind'] != 'speech':
                     continue
-                pipe = self.pipeline((item['voice'] or cfg['voice'])[0])
+                voice = item['voice'] or cfg['voice']
+                if voice.startswith(CLONE_PREFIX):
+                    out.append({'text': item['text'], 'speak': item['plain'], 'phonemes': item['plain'], 'cloned': True})
+                    continue
+                pipe = self.pipeline(voice[0])
                 g2p = getattr(pipe, 'g2p', None)
                 ps = g2p(item['speak'])[0] if g2p else None
                 out.append({'text': item['text'], 'speak': item['speak'], 'phonemes': ps})
@@ -204,6 +234,8 @@ class Engine:
         intensity = cfg['intensity'] if item['intensity'] is None else item['intensity']
         moves = blend_style(style, intensity)
         voice = item['voice'] or cfg['voice']
+        if voice.startswith(CLONE_PREFIX):
+            return self._speak_cloned(item, cfg, speed_scale, style, intensity, moves, voice)
         pipe = self.pipeline(voice[0])
         if voice == cfg['voice']:
             ref = self.voice_ref(pipe, voice, cfg['blend_voice'], cfg['blend'], cfg['blend_mode'])
@@ -240,6 +272,32 @@ class Engine:
             raise RuntimeError(f'Kokoro produced no audio for: "{item["text"][:60]}"')
         y = np.concatenate(pieces) * fx.db_to_amp(moves['gain'])
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': words, 'style': style,
+                'voice': voice, 'gap': moves['gap'], 'text': item['text']}
+
+    def _speak_cloned(self, item, cfg, speed_scale, style, intensity, moves, voice):
+        """Render one sentence with a cloned voice through Chatterbox.
+
+        Emotion maps to Chatterbox's exaggeration; pace maps to its CFG weight
+        (lower = slower, more deliberate). Both are approximate.
+        """
+        ref = self.library.ref_path(voice)
+        if ref is None:
+            raise ValueError('That cloned voice was deleted. Pick another voice.')
+        k = min(1.25, intensity)
+        exag = 0.5 + (CLONE_EXPR.get(style, 0.5) - 0.5) * k
+        exag += 0.3 * (cfg['range'] - 1) + 0.15 * cfg['energy']
+        exag = bounded(exag, 0.25, 1.6, 0.5)
+        pace = cfg['speed'] * item['speed'] * moves['speed'] * speed_scale
+        cfg_weight = bounded(0.5 - max(0.0, exag - 0.6) * 0.35 + (pace - 1) * 0.6, 0.15, 0.85, 0.5)
+        seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
+        y = self.cloner.speak(item['plain'], ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
+        y, _cut = fx.trim(np.asarray(y, dtype=np.float32))
+        if not y.size:
+            raise RuntimeError(f'The cloned voice produced no audio for: "{item["text"][:60]}"')
+        if abs(cfg['pitch']) > 0.04:
+            y = _fallback_pitch(y, cfg['pitch'])
+        y = y * fx.db_to_amp(moves['gain'])
+        return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': [], 'style': style,
                 'voice': voice, 'gap': moves['gap'], 'text': item['text']}
 
     def _render_pass(self, items, cfg, speed_scale):
@@ -321,7 +379,7 @@ class Engine:
             raise ValueError('Enter some text to speak.')
         if len(text) > MAX_TEXT:
             raise ValueError(f'The current limit is {MAX_TEXT:,} characters per take.')
-        cfg = read_settings(payload)
+        cfg = self.read_settings(payload)
         with self.lock:
             data, segments, sentences, warnings, info = self.render(text, cfg)
         y, rate, report = fx.finish(data, rate=cfg['rate'], lufs=cfg['lufs'], peak_db=cfg['peak'],

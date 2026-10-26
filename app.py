@@ -10,16 +10,17 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from studio.engine import Engine, public_catalog
+from studio.engine import Engine
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / 'static'
 OUT = HERE / 'outputs'
 ID_RE = re.compile(r'[0-9a-f]{32}')
 
-engine = Engine(OUT)
+engine = Engine(OUT, HERE / 'voices')
 app = Flask(__name__, static_folder=None)
 app.json.sort_keys = False
+app.config['MAX_CONTENT_LENGTH'] = 60 * 1024 * 1024  # voice uploads
 
 
 def device_status():
@@ -69,7 +70,7 @@ def status():
 
 @app.get('/api/voices')
 def voices():
-    return jsonify(public_catalog())
+    return jsonify(engine.catalog())
 
 
 def _payload():
@@ -194,6 +195,37 @@ def recordings():
             continue
     data.sort(key=lambda r: r.get('created', ''), reverse=True)
     return jsonify({'recordings': data[:200]})
+
+
+@app.post('/api/voices/clone')
+def add_cloned_voice():
+    """Upload a recording to make a cloned voice. The uploader confirms consent."""
+    upload = request.files.get('file')
+    if upload is None:
+        return jsonify({'error': 'Choose an audio file.'}), 400
+    if request.form.get('consent') != 'yes':
+        return jsonify({'error': 'Confirm you have the speaker\'s permission to use their voice.'}), 400
+    try:
+        voice = engine.library.add(upload.read(), upload.filename or '', request.form.get('name', ''),
+                                   request.form.get('gender', ''))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'ok': True, 'voice': voice, 'cloning': engine.cloner.status()})
+
+
+@app.get('/api/voices/clone/<slug>/sample')
+def cloned_sample(slug):
+    path = engine.library.ref_path('clone:' + slug)
+    if path is None:
+        abort(404)
+    return send_file(path, mimetype='audio/wav')
+
+
+@app.delete('/api/voices/clone/<slug>')
+def delete_cloned_voice(slug):
+    if not engine.library.delete('clone:' + slug):
+        abort(404)
+    return jsonify({'ok': True})
 
 
 @app.delete('/api/recordings/<rid>')

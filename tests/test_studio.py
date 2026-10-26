@@ -266,3 +266,93 @@ def test_engine_phonemize_and_pack_in_catalog(engine):
     engine.pipelines['a'].g2p = lambda t: (f'<{t}>', [])
     out = engine.phonemize({'text': 'Praise Yahuah.', 'pronunciations': [{'word': 'Yahuah', 'say': '/jɑhˈuɑ/'}]})
     assert out['sentences'][0]['phonemes'] == '<Praise [Yahuah](/jɑhˈuɑ/).>'
+
+
+# ---------- cloned voices ----------
+from studio.cloning import CloneWorker, VoiceLibrary, prepare_reference  # noqa: E402
+
+
+def _speechy(seconds, sr=24000, gap_at=None):
+    t = np.arange(int(sr * seconds)) / sr
+    y = 0.3 * np.sin(2 * np.pi * 150 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))
+    if gap_at is not None:
+        y[int(gap_at[0] * sr):int(gap_at[1] * sr)] = 0
+    return y.astype(np.float32)
+
+
+def _wav_bytes(y, sr=24000):
+    import io
+    buf = io.BytesIO()
+    sf.write(buf, y, sr, format='WAV')
+    return buf.getvalue()
+
+
+def test_reference_prep_picks_cleanest_window_first():
+    y = _speechy(25, gap_at=(1, 8))  # long silence early on
+    ref, info = prepare_reference(y)
+    assert len(ref) / 24000 <= 30
+    assert info['best_window_start'] >= 7.5
+    with pytest.raises(ValueError):
+        prepare_reference(_speechy(3))
+
+
+def test_library_add_list_delete(tmp_path):
+    lib = VoiceLibrary(tmp_path / 'voices')
+    v = lib.add(_wav_bytes(_speechy(12), 44100), 'marcus.wav', 'Marcus', 'Male')
+    assert v['id'] == 'clone:marcus' and lib.names() == {'clone:marcus': 'Marcus'}
+    v2 = lib.add(_wav_bytes(_speechy(12)), 'm2.wav', 'Marcus')
+    assert v2['id'] != v['id']
+    assert lib.get('clone:../etc') is None
+    assert lib.delete('clone:marcus') and len(lib.list()) == 1
+
+
+@pytest.fixture
+def cloning_engine(tmp_path):
+    worker = CloneWorker(python=sys.executable, script=Path(__file__).parent / 'fake_clone_worker.py', root=tmp_path)
+    e = Engine(tmp_path / 'out', voices_dir=tmp_path / 'voices', cloner=worker)
+    e.patched = True
+    e.pipelines['a'] = FakePipeline('a')
+    e.pipelines['b'] = FakePipeline('b')
+    e.library.add(_wav_bytes(_speechy(12)), 'deep.wav', 'Marcus', 'Male')
+    yield e
+    worker.close()
+
+
+def test_cloned_voice_render_with_emotion_and_pronunciation(cloning_engine):
+    e = cloning_engine
+    rules = [{'word': 'Yahuah', 'say': '/jɑhˈuɑ/', 'hint': 'yah-HOO-ah'}, {'word': 'Qadash', 'say': 'kah-DAHSH'}]
+    meta = e.synthesize({'text': '[calm] Praise Yahuah, he is Qadash. [voice=heart] [excited] And now a Kokoro line!',
+                         'voice': 'clone:marcus', 'pronunciations': rules, 'rate': 24000})
+    assert [s['voice'] for s in meta['segments']] == ['clone:marcus', 'af_heart']
+    assert e.pipelines['a'].calls[-1]['text'].startswith('And now')
+    srt = (e.out / f'{meta["id"]}.srt').read_text()
+    assert 'Praise Yahuah, he is Qadash.' in srt  # captions keep the real spelling
+    out = e.phonemize({'text': 'Praise Yahuah, he is Qadash.', 'voice': 'clone:marcus', 'pronunciations': rules})
+    assert out['sentences'][0]['phonemes'] == 'Praise yah-hoo-ah, he is kah-dahsh.'
+
+
+def test_cloned_voice_errors_are_reported(cloning_engine, tmp_path):
+    with pytest.raises(RuntimeError, match='stopped unexpectedly'):
+        cloning_engine.synthesize({'text': 'CRASH', 'voice': 'clone:marcus'})
+    # The worker restarts on the next request.
+    assert cloning_engine.synthesize({'text': 'Back again after a crash.', 'voice': 'clone:marcus'})['seconds'] > 0
+    missing = Engine(tmp_path / 'o2', voices_dir=tmp_path / 'voices', cloner=CloneWorker(python=tmp_path / 'nope', root=tmp_path))
+    with pytest.raises(RuntimeError, match='setup-cloning'):
+        missing.synthesize({'text': 'Hello there friend.', 'voice': 'clone:marcus'})
+    with pytest.raises(ValueError):
+        cloning_engine.synthesize({'text': 'Hi there.', 'voice': 'clone:nobody'})
+
+
+def test_clone_routes(cloning_engine, monkeypatch):
+    import app as server
+    monkeypatch.setattr(server, 'engine', cloning_engine)
+    c = server.app.test_client()
+    import io
+    r = c.post('/api/voices/clone', data={'name': 'Grace', 'gender': 'Female', 'file': (io.BytesIO(_wav_bytes(_speechy(15))), 'g.wav')})
+    assert r.status_code == 400 and 'permission' in r.get_json()['error']
+    r = c.post('/api/voices/clone', data={'name': 'Grace', 'consent': 'yes', 'file': (io.BytesIO(_wav_bytes(_speechy(15))), 'g.wav')})
+    assert r.get_json()['voice']['id'] == 'clone:grace'
+    cat = c.get('/api/voices').get_json()
+    assert {v['id'] for v in cat['cloned']} == {'clone:marcus', 'clone:grace'} and cat['cloning']['installed']
+    assert c.get('/api/voices/clone/grace/sample').mimetype == 'audio/wav'
+    assert c.delete('/api/voices/clone/grace').status_code == 200
