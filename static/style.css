@@ -187,8 +187,13 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
 .checks { display: grid; gap: 6px; margin-top: 12px; font-size: 13px; }
 .checks label { display: flex; gap: 8px; align-items: baseline; }
 .checks input { accent-color: var(--ink); }
-.pron-list { display: grid; gap: 6px; }
-.pron { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center; }
+.pron-list { display: grid; gap: 6px; max-height: 320px; overflow-y: auto; }
+.pron { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto auto; gap: 5px; align-items: center; }
+.pron .icon-btn { width: 26px; height: 28px; font-size: 11px; }
+.pron-actions { margin: 10px 0 0; }
+.pron-actions .btn { width: 100%; }
+.pron-check { margin-top: 8px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); font-size: 12px; color: var(--ink-2); display: grid; gap: 4px; }
+.pron-check b { color: var(--ink); font-weight: 500; word-break: break-all; }
 .pron .arrow { color: var(--muted); }
 .note { font-size: 11px; color: var(--muted); margin: 8px 0 0; }
 .reset { margin-top: 16px; font-size: 12px; }

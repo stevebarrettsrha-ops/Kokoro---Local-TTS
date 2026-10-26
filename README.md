@@ -76,12 +76,27 @@ Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar s
 | `[voice=george]` | Switch speaker for dialogue; `[voice=default]` switches back |
 | `[speed=1.1]` | Relative pace for the following text |
 | `*word*` | Emphasis |
-| `[Kokoro](/kˈOkəɹO/)` | Exact pronunciation (Kokoro phoneme notation) |
+| `[Yahuah](yah-HOO-ah)` | Sounds-like pronunciation for one spot; CAPS marks the stressed syllable |
+| `[live](liv)` | Same, for a single word |
+| `[Kokoro](/kˈOkəɹO/)` | Exact phonemes (ordinary IPA is converted for you) |
 | blank line | Paragraph pause |
 
 The 12 emotions are neutral, warm, joyful, excited, curious, confident, calm, sad, angry, fearful, dramatic and soft. Older tags (`[tender]`, `[whisper]`) still work.
 
-The **Pronunciation** list in the side panel fixes brand names and jargon everywhere (`SQL → sequel`, or phonemes between slashes).
+### Pronunciation
+
+Kokoro guesses unfamiliar words from their spelling. The **Pronunciation** list in the side panel fixes a word in every take. You can write the sound three ways:
+
+- sounds-like: `liv`
+- syllables, with the stressed one in CAPS: `yah-HOO-ah`
+- phonemes: `/jɑhˈuɑ/`
+
+Sounds-like spellings are converted with Kokoro's own pronunciation engine, so they behave the same way it reads ordinary words.
+
+- **Add Hebrew names** loads about 60 Scripture and Hebrew-roots names: Yahuah, Yahusha, Elohim, Qadash, Qodesh, Shamayim, Mishlei, Torah, Shabbat, Yerushalayim and more. Every entry can be edited.
+- **▷** plays a word on its own.
+- **Check line at cursor** shows exactly which sounds Kokoro will use.
+- **"Live"** is read as *liv* unless the next word makes it the broadcast sense (*live stream*, *live music*) or it closes a phrase like *we go live*. Override any spot with `[live](lyve)`.
 
 **Preview line** (Ctrl+Shift+Enter) plays the sentence at the cursor, or the selected text, with the current direction, without saving a take.
 
@@ -113,6 +128,7 @@ Your current draft and theme are kept in this browser's local storage so a refre
 - `studio/prosody.py`: in-model pitch/energy/pause shaping
 - `studio/styles.py`: emotion and output presets
 - `studio/script.py`: script notation parser
+- `studio/phonemes.py`: sounds-like respelling, IPA clean-up, Hebrew name pack, *live* fix
 - `studio/audio.py`: loudness (ITU BS.1770), limiter, polish, room tone
 - `studio/captions.py`: SRT/VTT builder
 - `static/`: the web UI

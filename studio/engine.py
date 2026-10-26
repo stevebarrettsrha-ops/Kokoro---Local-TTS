@@ -16,6 +16,7 @@ import soundfile as sf
 
 from . import audio as fx
 from . import captions as cc
+from .phonemes import PACKS, make_resolver
 from .prosody import Shape, patch_model, shaping
 from .script import parse_script
 from .styles import OUTPUT_PRESETS, STYLES, blend_style, canonical_style
@@ -112,7 +113,8 @@ def read_settings(payload):
         'lufs': lufs, 'peak': bounded(payload.get('peak', -1), -6, 0, -1), 'rate': rate,
         'polish': _flag(payload.get('polish'), True), 'room_tone': _flag(payload.get('room_tone'), False),
         'mp3': _flag(payload.get('mp3'), False), 'target_seconds': target,
-        'pronunciations': [r for r in rules[:200] if isinstance(r, dict)],
+        'pronunciations': [r for r in rules[:500] if isinstance(r, dict)],
+        'heteronyms': _flag(payload.get('heteronyms'), True),
     }
 
 
@@ -164,6 +166,37 @@ class Engine:
                 mix = base * (1 - amount) + other * amount
             pipe.voices[key] = mix
         return key
+
+    def resolver(self, voice):
+        """Pronunciation resolver backed by Kokoro's own G2P for this accent."""
+        lang = voice[0]
+        try:
+            g2p = getattr(self.pipeline(lang), 'g2p', None)
+        except Exception:  # noqa: BLE001 - fall back to plain-text replacement
+            g2p = None
+        fn = (lambda t: g2p(t)[0]) if g2p is not None else None
+        return make_resolver(fn, british=(lang == 'b'))
+
+    def parse(self, text, cfg):
+        return parse_script(text, VOICE_NAMES, cfg['pronunciations'], self.resolver(cfg['voice']), cfg['heteronyms'])
+
+    def phonemize(self, payload):
+        """What Kokoro will actually read, sentence by sentence."""
+        text = payload.get('text', '')
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('Nothing to phonemize.')
+        cfg = read_settings({**payload, 'text': text[:2000]})
+        out = []
+        with self.lock:
+            items, warnings = self.parse(text[:2000], cfg)
+            for item in items:
+                if item['kind'] != 'speech':
+                    continue
+                pipe = self.pipeline((item['voice'] or cfg['voice'])[0])
+                g2p = getattr(pipe, 'g2p', None)
+                ps = g2p(item['speak'])[0] if g2p else None
+                out.append({'text': item['text'], 'speak': item['speak'], 'phonemes': ps})
+        return {'sentences': out, 'warnings': warnings}
 
     # ---- rendering -------------------------------------------------------
     def _speak(self, item, cfg, speed_scale, index):
@@ -230,7 +263,7 @@ class Engine:
 
     def render(self, text, cfg):
         """Return (audio @24 kHz, segments, sentence word lists, warnings, info)."""
-        items, warnings = parse_script(text, VOICE_NAMES, cfg['pronunciations'])
+        items, warnings = self.parse(text, cfg)
         if not any(i['kind'] == 'speech' for i in items):
             raise ValueError('The script has no speakable text.')
         if len(items) > MAX_ITEMS:
@@ -354,4 +387,5 @@ def public_catalog():
         'styles': [{'id': k, 'label': v['label'], **{p: v[p] for p in ('speed', 'pitch', 'range', 'tilt', 'energy', 'gap')}}
                    for k, v in STYLES.items()],
         'presets': OUTPUT_PRESETS,
+        'packs': PACKS,
     }

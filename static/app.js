@@ -250,13 +250,44 @@ function renderPron() {
     <div class="pron">
       <input class="input" data-i="${i}" data-k="word" value="${esc(p.word)}" placeholder="Word" aria-label="Word">
       <span class="arrow">→</span>
-      <input class="input" data-i="${i}" data-k="say" value="${esc(p.say)}" placeholder="Say it like" aria-label="Pronunciation">
-      <button class="icon-btn" data-del="${i}" aria-label="Remove">×</button>
+      <input class="input mono-ish" data-i="${i}" data-k="say" value="${esc(p.say)}" placeholder="yah-HOO-ah" aria-label="Say it like"${p.hint ? ` title="Sounds like: ${esc(p.hint)}"` : ''}>
+      <button class="icon-btn" data-test="${i}" aria-label="Hear this word" title="Hear it">▷</button>
+      <button class="icon-btn" data-del="${i}" aria-label="Remove" title="Remove">×</button>
     </div>`).join('');
+  $('#pronCount').textContent = state.pron.length ? `${state.pron.length} word${state.pron.length === 1 ? '' : 's'}` : 'applies to every take';
   $$('#pronList input').forEach(inp => inp.oninput = () => { state.pron[+inp.dataset.i][inp.dataset.k] = inp.value; changed(); });
   $$('#pronList [data-del]').forEach(b => b.onclick = () => { state.pron.splice(+b.dataset.del, 1); renderPron(); changed(); });
+  $$('#pronList [data-test]').forEach(b => b.onclick = () => testWord(state.pron[+b.dataset.test].word));
+}
+async function showPhonemes(text) {
+  const out = $('#pronCheck');
+  try {
+    const r = await api('/api/phonemize', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload(text))});
+    out.innerHTML = r.sentences.map(x => `<div><span>${esc(x.text)}</span> <b class="mono">${esc(x.phonemes ?? '?')}</b></div>`).join('');
+    out.hidden = false;
+  } catch (err) { out.textContent = err.message; out.hidden = false; }
+}
+async function testWord(word) {
+  word = String(word || '').trim();
+  if (!word) { toast('Type the word first.'); return; }
+  await showPhonemes(word);
+  preview(word);
 }
 $('#addPron').onclick = () => { state.pron.push({word: '', say: ''}); renderPron(); $$('#pronList .pron:last-child input')[0]?.focus(); };
+$('#addPack').onclick = () => {
+  const pack = state.catalog?.packs?.hebrew;
+  if (!pack) { toast('Start the engine to load the name pack.'); return; }
+  const have = new Set(state.pron.map(p => p.word.trim().toLowerCase()));
+  const add = pack.words.filter(w => !have.has(w.word.toLowerCase()));
+  state.pron.push(...add.map(w => ({...w})));
+  renderPron(); changed();
+  toast(add.length ? `Added ${add.length} names. Edit any you say differently.` : 'Those names are already in your list.');
+};
+$('#checkLine').onclick = () => {
+  const line = lineAtCursor().replace(TAG_RE, '').trim();
+  if (!line) { toast('Put the cursor in a line first.'); return; }
+  showPhonemes(line);
+};
 
 /* ---------- editor ---------- */
 const script = $('#script'), backdrop = $('#backdrop');
