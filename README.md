@@ -199,6 +199,9 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 
 ## Troubleshooting
 
+- **Updated to a new version and it wants to download everything again**: the new files probably landed in a different folder from your old install. From the new folder, run `./move-old-setup.sh /path/to/old/folder` to move your Python environment, downloaded models, takes, voices and videos across, then run `./start.sh`.
+- **`Permission denied` when running a script**: run `chmod +x *.sh` once, or start with `bash start.sh`.
+
 - **Engine not running**: start `./start.sh` and reload the page.
 - **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh`, then `./start.sh`.
 - **`Requires-Python >=3.10,<3.13`**: install Python 3.12 with `uv` as above and rerun `./start.sh`.
