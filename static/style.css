@@ -25,7 +25,7 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans);
-  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; -webkit-font-smoothing: antialiased;
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; -webkit-font-smoothing: antialiased;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -297,9 +297,12 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
   .paper { min-height: 320px; }
 }
 @media (max-width: 760px) {
-  .bar { gap: 12px; padding: 0 12px; }
+  .bar { gap: 10px; padding: 0 12px; }
   .status #deviceText, .status #engineText, .status .sep, .brand span { display: none; }
   .tab { padding: 0 8px; }
+  .tabs { flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .brand, .status { flex: none; }
   .editor { padding: 14px 16px; }
   .inspector { padding: 4px 16px 20px; }
   .doc-head { flex-direction: column; gap: 6px; }
