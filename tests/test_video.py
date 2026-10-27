@@ -187,3 +187,32 @@ def test_export_with_every_transition_and_animation(tmp_path, assets):
     dur = float(subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0',
                                 str(jobs.export_path(done['file']))], capture_output=True, text=True).stdout)
     assert dur == pytest.approx(len(vid.TRANSITIONS) * 1.2, abs=0.3)
+
+
+def _jpeg_with_orientation(src_jpg, orientation):
+    """Insert a minimal EXIF block with the given orientation into a JPEG."""
+    data = src_jpg.read_bytes()
+    tiff = b'MM\x00\x2a\x00\x00\x00\x08' + b'\x00\x01' + b'\x01\x12\x00\x03\x00\x00\x00\x01' + \
+        orientation.to_bytes(2, 'big') + b'\x00\x00' + b'\x00\x00\x00\x00'
+    app1 = b'Exif\x00\x00' + tiff
+    seg = b'\xff\xe1' + (len(app1) + 2).to_bytes(2, 'big') + app1
+    return data[:2] + seg + data[2:]
+
+
+def test_phone_photo_orientation_and_odd_formats(tmp_path):
+    ff('-f', 'lavfi', '-i', 'testsrc=size=400x200', '-frames:v', '1', str(tmp_path / 'wide.jpg'))
+    rotated = _jpeg_with_orientation(tmp_path / 'wide.jpg', 6)
+    assert vid.jpeg_orientation(tmp_path / 'wide.jpg') == 1
+    (tmp_path / 'r.jpg').write_bytes(rotated)
+    assert vid.jpeg_orientation(tmp_path / 'r.jpg') == 6
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    m = lib.add(rotated, 'IMG_0001.JPG')                       # upper-case extension, EXIF says "rotate 90"
+    assert m['kind'] == 'image' and (m['width'], m['height']) == (200, 400)
+    assert vid.jpeg_orientation(lib.path(m['id'])) == 1      # stored upright, no EXIF left to double-rotate
+    ff('-f', 'lavfi', '-i', 'testsrc=size=120x80', '-frames:v', '1', str(tmp_path / 'scan.tiff'))
+    t = lib.add((tmp_path / 'scan.tiff').read_bytes(), 'scan.tiff')
+    assert t['kind'] == 'image' and t['file'].endswith('.png')
+    noext = lib.add((tmp_path / 'wide.jpg').read_bytes(), 'photo_from_phone')   # no extension at all
+    assert noext['kind'] == 'image'
+    with pytest.raises(ValueError, match='HEIC'):
+        lib.add(b'xx', 'IMG_2.HEIC')

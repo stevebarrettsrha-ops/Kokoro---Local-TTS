@@ -9,6 +9,10 @@ export HF_HUB_OFFLINE="${OFFLINE:-0}"
 export HF_DATASETS_OFFLINE="${OFFLINE:-0}"
 mkdir -p "$HF_HOME" outputs
 
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  echo 'NOTICE: ffmpeg is not installed. The Video tab needs it to upload and export.' >&2
+  echo '        Install it with: sudo apt install ffmpeg' >&2
+fi
 if ! command -v espeak-ng >/dev/null 2>&1; then
   echo 'NOTICE: espeak-ng not found. Install with: sudo apt install espeak-ng libsndfile1' >&2
 fi

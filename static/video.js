@@ -309,8 +309,9 @@ $$('.ve-bin-tabs button').forEach(b => b.onclick = () => {
 });
 
 async function upload(files) {
-  files = [...files]; if (!files.length) return;
+  files = [...files]; if (!files.length) return [];
   const stateEl = $('#veUploadState');
+  stateEl.classList.remove('error');
   const data = new FormData(); files.forEach(f => data.append('files', f));
   stateEl.textContent = `Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`;
   try {
@@ -325,9 +326,32 @@ async function upload(files) {
     r.added.forEach(m => { st.media[m.id] = m; });
     renderBin();
     stateEl.textContent = `Added ${r.added.length} file${r.added.length === 1 ? '' : 's'}.` + (r.errors.length ? ' ' + r.errors.join(' ') : '');
+    stateEl.classList.toggle('error', r.errors.length > 0);
     if (r.added.some(m => m.proxy === 'pending')) pollProxies();
-  } catch (err) { stateEl.textContent = err.message; }
+    $$('.ve-bin-tabs button')[0].click();
+    return r.added;
+  } catch (err) { stateEl.textContent = err.message; stateEl.classList.add('error'); $$('.ve-bin-tabs button')[0].click(); return []; }
 }
+/* Files dropped anywhere in the Video tab are uploaded (never opened by the browser).
+   Dropped on a track, they land there; dropped on the picture, at the playhead. */
+const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+window.addEventListener('drop', async e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  if (document.body.dataset.view !== 'video') { K.toast('Open the Video tab to add pictures and videos.'); return; }
+  if (e.target.closest('#veDrop')) return;  // the upload box handles its own drops
+  const laneEl = e.target.closest('.ve-lane'), onStage = e.target.closest('#veStage');
+  const at = laneEl ? snapTime(xToTime(e.clientX), null) : st.time;
+  const added = await upload(e.dataTransfer.files);
+  if (!added.length || (!laneEl && !onStage)) return;
+  let t = at;
+  for (const m of added) {
+    const lane = laneEl && laneOf(laneEl.dataset.lane).kinds.includes(m.kind === 'audio' ? 'audio' : m.kind) ? laneEl.dataset.lane : null;
+    const c = addMedia(m, t, lane);
+    if (c) t = c.start + c.duration;
+  }
+});
 let proxyTimer = 0;
 function pollProxies() {
   clearTimeout(proxyTimer);
@@ -1177,7 +1201,7 @@ function init() {
   if (!booting) booting = (async () => {
     try {
       const status = await api('/api/video/status');
-      if (!status.ffmpeg) K.toast('Install ffmpeg to use the video editor: sudo apt install ffmpeg');
+      $('#veNoFfmpeg').hidden = !!status.ffmpeg;
       renderPresets();
       await loadLibrary();
       let last = store.get('ve-last', null);

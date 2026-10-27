@@ -24,7 +24,9 @@ from pathlib import Path
 
 ID_RE = re.compile(r'[0-9a-f]{32}')
 COLOR_RE = re.compile(r'#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?')
-IMAGE_EXT = {'png', 'jpg', 'jpeg', 'webp', 'bmp'}
+IMAGE_EXT = {'png', 'jpg', 'jpeg', 'jfif', 'webp', 'bmp', 'tif', 'tiff', 'avif'}
+BROWSER_IMAGE = {'png', 'jpg', 'jpeg', 'webp', 'bmp', 'avif'}
+IMAGE_CODECS = {'mjpeg', 'png', 'webp', 'bmp', 'tiff', 'jpegls', 'jpeg2000', 'av1'}
 VIDEO_EXT = {'mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'gif'}
 AUDIO_EXT = {'mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'opus'}
 BROWSER_VIDEO = {'h264', 'vp8', 'vp9', 'av1'}
@@ -61,6 +63,42 @@ def _num(v, lo, hi, default):
 
 
 # ---------------------------------------------------------------- probing
+def jpeg_orientation(path):
+    """EXIF orientation (1-8) of a JPEG, or 1. Phones store photos sideways plus this flag."""
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read(256 * 1024)
+    except OSError:
+        return 1
+    if not data.startswith(b'\xff\xd8'):
+        return 1
+    i = 2
+    while i + 4 < len(data):
+        if data[i] != 0xFF:
+            return 1
+        marker, size = data[i + 1], int.from_bytes(data[i + 2:i + 4], 'big')
+        if marker == 0xE1 and data[i + 4:i + 10] == b'Exif\x00\x00':
+            t = i + 10
+            order = 'little' if data[t:t + 2] == b'II' else 'big'
+            ifd = t + int.from_bytes(data[t + 4:t + 8], order)
+            if ifd + 2 > len(data):
+                return 1
+            for k in range(int.from_bytes(data[ifd:ifd + 2], order)):
+                e = ifd + 2 + 12 * k
+                if int.from_bytes(data[e:e + 2], order) == 0x0112:
+                    v = int.from_bytes(data[e + 8:e + 10], order)
+                    return v if 1 <= v <= 8 else 1
+            return 1
+        if marker in (0xDA, 0xD9):
+            return 1
+        i += 2 + size
+    return 1
+
+
+ORIENT_FILTERS = {2: 'hflip', 3: 'hflip,vflip', 4: 'vflip', 5: 'transpose=0', 6: 'transpose=1', 7: 'transpose=3',
+                  8: 'transpose=2'}
+
+
 def probe(path):
     """Duration, size and streams of a media file (ffprobe)."""
     exe = tools()['ffprobe']
@@ -69,7 +107,8 @@ def probe(path):
     proc = subprocess.run([exe, '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', str(path)],
                           capture_output=True, text=True, timeout=60)
     if proc.returncode != 0:
-        raise ValueError('That file could not be read as audio, video or an image.')
+        raise ValueError(f'"{Path(path).name}" could not be read as audio, video or a picture. '
+                         'It may be damaged, or a format ffmpeg on this computer cannot open.')
     data = json.loads(proc.stdout or '{}')
     streams = data.get('streams', [])
     video = next((s for s in streams if s.get('codec_type') == 'video'
@@ -77,6 +116,7 @@ def probe(path):
     audio = next((s for s in streams if s.get('codec_type') == 'audio'), None)
     duration = _num(data.get('format', {}).get('duration'), 0, 1e7, 0.0)
     info = {'duration': round(duration, 3), 'has_audio': audio is not None, 'has_video': video is not None,
+            'format': data.get('format', {}).get('format_name', ''),
             'codec': video.get('codec_name') if video else None, 'width': 0, 'height': 0,
             'frames': int(video.get('nb_frames') or 0) if video and str(video.get('nb_frames', '')).isdigit() else 0}
     if video:
@@ -149,21 +189,19 @@ class MediaLibrary:
 
     def _add(self, src: Path, filename: str):
         ext = Path(filename or '').suffix.lower().lstrip('.')
-        if ext in IMAGE_EXT:
-            kind = 'image'
-        elif ext in VIDEO_EXT:
-            kind = 'video'
-        elif ext in AUDIO_EXT:
-            kind = 'audio'
-        elif ext in ('heic', 'heif'):
-            raise ValueError('HEIC photos are not supported yet. Export them as JPG first (most phones can share as JPG).')
-        else:
-            raise ValueError(f'"{filename}" is not a supported picture, video or audio file.')
+        if ext in ('heic', 'heif'):
+            raise ValueError(f'"{filename}" is an iPhone HEIC photo, which can\'t be read here. On the phone choose '
+                             '"Most Compatible" (Settings > Camera > Formats), or share it as JPG.')
+        kind = 'image' if ext in IMAGE_EXT else 'video' if ext in VIDEO_EXT else 'audio' if ext in AUDIO_EXT else None
+        if not tools()['ffprobe']:
+            raise RuntimeError('ffmpeg is not installed, so pictures and videos can\'t be read. '
+                               'Install it with:  sudo apt install ffmpeg  and restart the studio.')
         size = src.stat().st_size if src.exists() else 0
         if not size:
             raise ValueError(f'"{filename}" is empty.')
         mid = uuid.uuid4().hex
-        stored = f'{mid}.{ext}'
+        safe_ext = ext if re.fullmatch(r'[a-z0-9]{1,5}', ext or '') else 'bin'
+        stored = f'{mid}.{safe_ext}'
         path = self.dir / stored
         shutil.move(str(src), path)
         try:
@@ -171,9 +209,18 @@ class MediaLibrary:
         except Exception:
             path.unlink(missing_ok=True)
             raise
+        if kind is None:  # unknown or missing extension: decide from the content
+            is_still = info['has_video'] and (info['codec'] in IMAGE_CODECS or '_pipe' in info['format'] or
+                                             info['format'].startswith('image2')) and info['frames'] <= 1
+            kind = 'image' if is_still else 'video' if info['has_video'] else 'audio' if info['has_audio'] else None
+            if kind is None:
+                path.unlink(missing_ok=True)
+                raise ValueError(f'"{filename}" is not a picture, video or audio file.')
+        if kind == 'image':
+            path, stored, info = self._normalise_image(path, mid, safe_ext, info)
         if kind in ('video', 'audio') and not info['duration']:
             # Browser recordings (MediaRecorder WebM) often carry no duration; a copy-remux adds it.
-            fixed = path.with_name(f'{mid}.fixed.{ext}')
+            fixed = path.with_name(f'{mid}.fixed.{safe_ext}')
             subprocess.run([tools()['ffmpeg'] or 'ffmpeg', '-y', '-loglevel', 'error', '-i', str(path), '-c', 'copy', str(fixed)],
                            capture_output=True, timeout=600)
             if fixed.is_file() and fixed.stat().st_size:
@@ -189,7 +236,7 @@ class MediaLibrary:
             path.unlink(missing_ok=True)
             raise ValueError(f'"{filename}" has no audio in it.')
         meta = {'id': mid, 'name': Path(filename).stem[:80] or 'Untitled', 'kind': kind, 'file': stored,
-                'ext': ext, 'created': now(), 'size': size, **info}
+                'ext': Path(stored).suffix.lstrip('.'), 'created': now(), 'size': size, **info}
         if kind == 'image':
             meta['duration'] = None
         needs_proxy = kind == 'video' and (ext not in ('mp4', 'webm', 'm4v') or info['codec'] not in BROWSER_VIDEO)
@@ -200,6 +247,33 @@ class MediaLibrary:
         if needs_proxy:
             threading.Thread(target=self._make_proxy, args=(mid,), daemon=True).start()
         return self.get(mid)
+
+    def _normalise_image(self, path, mid, ext, info):
+        """Make a picture upright and browser-viewable, so preview and export agree."""
+        orient = jpeg_orientation(path) if ext in ('jpg', 'jpeg', 'jfif', 'bin') else 1
+        if orient == 1 and ext in BROWSER_IMAGE:
+            return path, path.name, info
+        exe = tools()['ffmpeg']
+        out_ext = 'jpg' if info.get('codec') == 'mjpeg' else 'png'
+        out = self.dir / f'{mid}.{out_ext}'
+        tmp = self.dir / f'.{mid}.conv.{out_ext}'
+        vf = ORIENT_FILTERS.get(orient)
+        cmd = [exe, '-y', '-loglevel', 'error', '-noautorotate', '-i', str(path), '-frames:v', '1', '-map_metadata', '-1']
+        if vf:
+            cmd += ['-vf', vf]
+        if out_ext == 'jpg':
+            cmd += ['-q:v', '2']
+        proc = subprocess.run(cmd + [str(tmp)], capture_output=True, timeout=120)
+        if proc.returncode != 0 or not tmp.is_file():
+            tmp.unlink(missing_ok=True)
+            if ext in BROWSER_IMAGE:
+                return path, path.name, info  # keep the original rather than fail
+            path.unlink(missing_ok=True)
+            raise ValueError('That picture format could not be converted. Save it as JPG or PNG and try again.')
+        if path != out:
+            path.unlink(missing_ok=True)
+        tmp.replace(out)
+        return out, out.name, {**probe(out), 'format': info.get('format', '')}
 
     def _make_thumb(self, meta):
         exe = tools()['ffmpeg']

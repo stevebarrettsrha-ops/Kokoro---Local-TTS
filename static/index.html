@@ -224,6 +224,10 @@
       <button class="render-btn small" id="veExport"><span class="rec-dot" aria-hidden="true"></span>Export MP4</button>
     </div>
 
+    <div class="ve-banner" id="veNoFfmpeg" hidden>
+      <b>ffmpeg isn't installed</b>, so pictures and videos can't be uploaded or exported. In a terminal run
+      <span class="mono">sudo apt install ffmpeg</span>, then restart the studio (Ctrl+C, then <span class="mono">./start.sh</span>).
+    </div>
     <div class="ve-main">
       <aside class="ve-bin" aria-label="Media">
         <div class="ve-bin-tabs" role="tablist">

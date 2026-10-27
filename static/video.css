@@ -1,7 +1,7 @@
 /* Video editor. Shares tokens with style.css. */
 body:not([data-view="script"]) .transport { display: none; }
 #view-video.active { height: 100%; overflow: hidden; }
-.ve { display: grid; grid-template-rows: auto minmax(0, 1fr) 250px; height: 100%; min-height: 560px; }
+.ve { display: grid; grid-template-rows: auto auto minmax(0, 1fr) 250px; height: 100%; min-height: 560px; }
 
 .ve-top { display: flex; align-items: center; gap: 14px; padding: 8px 18px; border-bottom: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
 .ve-name { flex: 0 1 280px; font-size: 18px; }
@@ -161,3 +161,7 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 .ve-lane:hover .ve-tr, .ve-tr.on { opacity: 1; }
 .ve-tr.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .ve-small { font-size: 11px; margin: -2px 0 8px; display: block; text-align: left; }
+.ve-banner { padding: 8px 18px; background: color-mix(in srgb, var(--err) 14%, var(--surface)); border-bottom: 1px solid var(--err); font-size: 13px; }
+.ve-banner[hidden] { display: none; }
+.ve-upload-state.error { color: var(--err); }
+.ve-top { grid-row: 1; } .ve-banner { grid-row: 2; } .ve-main { grid-row: 3; } .ve-timeline { grid-row: 4; }
