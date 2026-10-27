@@ -79,6 +79,7 @@ function show(view) {
   document.body.dataset.view = view;
   if (view !== 'script' && !audio.paused) audio.pause();
   if (view === 'takes') loadTakes();
+  if (view === 'voices') { renderCloneList(); refreshEngine(); }
   if (view === 'video') window.KVideo?.onShow();
   else window.KVideo?.onHide();
 }
@@ -729,26 +730,57 @@ $('#voice').addEventListener('change', () => {
 });
 $('#newRead').onclick = () => { state.variation = ((state.variation || 0) + 1) % 10000; updateVoiceMode(); changed(); render(); };
 
-function openVoices() {
-  renderCloneList();
-  $('#cloneMsg').textContent = ''; $('#cloneMsg').className = 'msg';
-  $('#voiceDialog').showModal();
-}
+function openVoices() { show('voices'); }
 $('#openVoices').onclick = openVoices;
+let installPoll = 0;
+async function refreshEngine() {
+  let st = state.catalog?.cloning || {};
+  try { st = await api('/api/cloning/install'); } catch { /* engine offline */ }
+  const installed = !!st.installed, job = st.job || {};
+  $('#voLed').className = 'led ' + (installed ? 'on' : job.status === 'running' ? 'busy' : 'err');
+  $('#voEngineTitle').textContent = installed ? 'Voice cloning is installed' : job.status === 'running' ? 'Installing voice cloning…' : 'Voice cloning is not installed yet';
+  $('#voEngineText').textContent = installed
+    ? 'Cloned voices are ready to use. The first line you render loads the model (about 30 seconds).'
+    : job.status === 'running' ? 'This downloads about 9 GB (software plus model) and can take a while on a slow connection. You can keep using the rest of the studio.'
+    : job.status === 'failed' ? 'The install stopped with an error (see below). Check your internet connection and press Install again; it continues where it left off.'
+    : 'One-time setup: about 9 GB to download (software plus model). You can add voices now and install later.';
+  $('#voInstall').hidden = installed || job.status === 'running';
+  $('#voInstall').textContent = job.status === 'failed' ? 'Try again' : 'Install voice cloning';
+  const log = $('#voLog');
+  log.hidden = !job.log?.length;
+  if (job.log?.length) { log.textContent = job.log.join('\n'); log.scrollTop = log.scrollHeight; }
+  clearTimeout(installPoll);
+  if (job.status === 'running') installPoll = setTimeout(refreshEngine, 2000);
+  else if (job.status === 'done' && !state.catalog?.cloning?.installed) refreshCatalog().catch(() => {});
+}
+$('#voInstall').onclick = async () => {
+  if (!confirm('Install voice cloning now? It downloads about 9 GB and can take a while. You can keep using the studio meanwhile.')) return;
+  try { await api('/api/cloning/install', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}); }
+  catch (err) { toast(err.message); }
+  refreshEngine();
+};
 function renderCloneList() {
-  const st = state.catalog?.cloning || {}, list = state.catalog?.cloned || [];
-  $('#cloneEngine').innerHTML = st.installed
-    ? '<span class="led on"></span> Cloning engine installed.'
-    : '<span class="led err"></span> Cloning engine not installed yet. You can add voices now, but to <b>use</b> them, stop the studio, run <span class="mono">./setup-cloning.sh</span> once, then start it again.';
+  const list = state.catalog?.cloned || [];
   $('#cloneList').innerHTML = list.length ? list.map(v => `
-    <div class="clone-row">
-      <button type="button" class="icon-btn" data-sample="${esc(v.slug)}" title="Play the recording" aria-label="Play ${esc(v.name)}'s recording">▷</button>
-      <div><b>${esc(v.name)}</b> <span class="muted">${v.gender ? esc(v.gender.toLowerCase()) + ' · ' : ''}${v.seconds ?? '?'}s</span></div>
-      <button type="button" class="link-btn" data-use="${esc(v.id)}">Use</button>
+    <div class="vo-voice">
+      <div class="vo-voice-main"><b>${esc(v.name)}</b><span class="muted">${v.gender ? esc(v.gender.toLowerCase()) + ' · ' : ''}${v.seconds ?? '?'}s recording</span></div>
+      <button type="button" class="btn ghost" data-sample="${esc(v.slug)}">▷ Recording</button>
+      <button type="button" class="btn ghost" data-try="${esc(v.id)}">▷ Hear it speak</button>
+      <button type="button" class="btn" data-use="${esc(v.id)}">Use in Script</button>
       <button type="button" class="link-btn danger" data-remove="${esc(v.slug)}">Delete</button>
-    </div>`).join('') : '<p class="muted">No voices yet.</p>';
+    </div>`).join('') : '<p class="muted">No voices yet. Add one below.</p>';
   $$('#cloneList [data-sample]').forEach(b => b.onclick = () => { const a = new Audio(`/api/voices/clone/${b.dataset.sample}/sample`); a.play().catch(() => {}); });
-  $$('#cloneList [data-use]').forEach(b => b.onclick = () => { setSelect($('#voice'), b.dataset.use); updateVoiceMode(); changed(); $('#voiceDialog').close(); });
+  $$('#cloneList [data-try]').forEach(b => b.onclick = async () => {
+    if (!state.catalog?.cloning?.installed) { toast('Install voice cloning first (button at the top of this page).'); return; }
+    b.disabled = true; const label = b.textContent; b.textContent = 'Speaking… (first time loads the model)';
+    try {
+      const r = await api('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...payload('Hello! This is my new voice. I can read your scripts for videos, with real feeling.'), voice: b.dataset.try, target_seconds: null})});
+      const url = URL.createObjectURL(await r.blob()); const a = new Audio(url); a.onended = () => URL.revokeObjectURL(url); await a.play().catch(() => {});
+    } catch (err) { toast(err.message); }
+    finally { b.disabled = false; b.textContent = label; }
+  });
+  $$('#cloneList [data-use]').forEach(b => b.onclick = () => { setSelect($('#voice'), b.dataset.use); updateVoiceMode(); changed(); show('script'); toast('Voice selected. Render as usual.'); });
   $$('#cloneList [data-remove]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this voice? Takes already rendered are kept.')) return;
     try { await api('/api/voices/clone/' + b.dataset.remove, {method: 'DELETE'}); await refreshCatalog(); renderCloneList(); }
@@ -760,12 +792,37 @@ async function refreshCatalog() {
   state.catalog = {...state.catalog, ...cat};
   renderVoiceOptions();
 }
+/* microphone recording */
+const rec = {mr: null, chunks: [], blob: null, t0: 0, timer: 0, stream: null};
+$('#voRecBtn').onclick = async () => {
+  if (rec.mr?.state === 'recording') { rec.mr.stop(); return; }
+  try { rec.stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: true, autoGainControl: true}}); }
+  catch (err) { toast('Microphone not available: ' + err.message); return; }
+  const type = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'].find(t => window.MediaRecorder?.isTypeSupported(t));
+  rec.chunks = []; rec.blob = null;
+  rec.mr = new MediaRecorder(rec.stream, type ? {mimeType: type, audioBitsPerSecond: 128000} : undefined);
+  rec.mr.ondataavailable = e => { if (e.data.size) rec.chunks.push(e.data); };
+  rec.mr.onstop = () => {
+    clearInterval(rec.timer); rec.stream.getTracks().forEach(t => t.stop());
+    rec.blob = new Blob(rec.chunks, {type: rec.mr.mimeType || 'audio/webm'});
+    const secs = (Date.now() - rec.t0) / 1000;
+    $('#voRecBtn').innerHTML = '<span class="rec-dot" aria-hidden="true"></span> Record again';
+    $('#voRecTime').textContent = `${secs.toFixed(0)} s recorded` + (secs < 8 ? ' (too short; aim for 20–30 s)' : '');
+    const pl = $('#voRecPlay'); pl.src = URL.createObjectURL(rec.blob); pl.hidden = false;
+  };
+  rec.mr.start(500); rec.t0 = Date.now();
+  $('#voRecBtn').innerHTML = '■ Stop recording';
+  rec.timer = setInterval(() => { $('#voRecTime').textContent = '● ' + ((Date.now() - rec.t0) / 1000).toFixed(0) + ' s'; }, 250);
+};
 $('#cloneForm').addEventListener('submit', async e => {
-  if (e.submitter && e.submitter.value === 'close') return;
   e.preventDefault();
   const form = $('#cloneForm'), m = $('#cloneMsg');
   if (!form.reportValidity()) return;
   const data = new FormData(form);
+  if (!$('#cloneFile').files.length) {
+    if (!rec.blob) { m.className = 'msg error'; m.textContent = 'Record yourself or choose a recording first.'; return; }
+    data.set('file', new File([rec.blob], 'microphone.webm', {type: rec.blob.type}));
+  }
   $('#cloneSubmit').disabled = true; m.className = 'msg'; m.textContent = 'Preparing the recording…';
   try {
     const r = await fetch('/api/voices/clone', {method: 'POST', body: data});
@@ -773,9 +830,11 @@ $('#cloneForm').addEventListener('submit', async e => {
     if (!r.ok) throw Error(j.error || 'Upload failed');
     await refreshCatalog();
     setSelect($('#voice'), j.voice.id); updateVoiceMode(); changed();
-    form.reset(); renderCloneList();
+    form.reset(); rec.blob = null; $('#voRecPlay').hidden = true; $('#voRecTime').textContent = '';
+    $('#voRecBtn').innerHTML = '<span class="rec-dot" aria-hidden="true"></span> Start recording';
+    renderCloneList();
     m.className = 'msg ok';
-    m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.' : ' Run ./setup-cloning.sh to start using it.');
+    m.textContent = `${j.voice.name} is ready and selected in the Script tab.` + (j.cloning.installed ? ' Press "Hear it speak" to try it.' : ' Install voice cloning above to start using it.');
   } catch (err) { m.className = 'msg error'; m.textContent = err.message; }
   finally { $('#cloneSubmit').disabled = false; }
 });

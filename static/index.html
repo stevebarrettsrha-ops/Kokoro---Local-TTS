@@ -13,6 +13,7 @@
   <div class="brand">Kokoro<span>Studio</span></div>
   <nav class="tabs" aria-label="Views">
     <button class="tab active" data-view="script">Script</button>
+    <button class="tab" data-view="voices">Voices</button>
     <button class="tab" data-view="video">Video</button>
     <button class="tab" data-view="takes">Takes <span class="count" id="takeCount"></span></button>
     <button class="tab" data-view="guide">Guide</button>
@@ -105,7 +106,7 @@
           <input type="range" id="blend" min="0.05" max="0.7" step="0.05" value="0.3">
         </div>
         </div>
-        <button class="btn ghost wide" id="openVoices">Add a voice from a recording…</button>
+        <button class="btn ghost wide" id="openVoices">Your voices · clone a voice…</button>
       </section>
 
       <section class="group">
@@ -198,6 +199,66 @@
 
       <button class="link-btn reset" id="resetBtn">Reset direction to defaults</button>
     </aside>
+  </div>
+</section>
+
+<!-- ============ VOICES (cloning) ============ -->
+<section class="view" id="view-voices">
+  <div class="page">
+    <div class="page-head">
+      <h1>Your voices</h1>
+      <p class="muted">Make a voice from a short recording of a real person, using Chatterbox, a voice-cloning model that runs on this computer. Cloned voices appear at the top of the Script tab's voice list and work in the Video tab too.</p>
+    </div>
+
+    <section class="vo-card" id="voEngine">
+      <div class="vo-engine-head">
+        <span class="led" id="voLed"></span>
+        <div class="grow"><b id="voEngineTitle">Checking the cloning engine…</b><div class="muted" id="voEngineText"></div></div>
+        <button class="render-btn small" id="voInstall" hidden>Install voice cloning</button>
+      </div>
+      <pre class="vo-log mono" id="voLog" hidden></pre>
+    </section>
+
+    <h2 class="vo-h">Voices</h2>
+    <div id="cloneList" class="vo-list"></div>
+
+    <h2 class="vo-h">Add a voice</h2>
+    <form class="vo-card" id="cloneForm" autocomplete="off">
+      <div class="row two">
+        <label class="mini">Name<input class="input" name="name" id="cloneName" maxlength="40" placeholder="e.g. Marcus" required></label>
+        <label class="mini">Voice type
+          <select class="input" name="gender"><option value="">—</option><option>Male</option><option>Female</option></select>
+        </label>
+      </div>
+      <div class="vo-source">
+        <div class="vo-col">
+          <h3>Record with your microphone</h3>
+          <p class="muted">Read this aloud naturally, in the voice you want for your videos (about 25 seconds):</p>
+          <blockquote class="vo-read" id="voReadText">Every morning I take a few minutes before the day begins. I make a cup of tea, open the window, and listen to the street wake up. Some days are busy and loud, and some are slow and quiet, but I've learned that both have something to teach. So today, let's take it one step at a time, and enjoy the journey as much as the destination.</blockquote>
+          <div class="vo-rec">
+            <button type="button" class="btn" id="voRecBtn"><span class="rec-dot" aria-hidden="true"></span> Start recording</button>
+            <span class="mono" id="voRecTime"></span>
+            <audio id="voRecPlay" controls hidden></audio>
+          </div>
+        </div>
+        <div class="vo-or">or</div>
+        <div class="vo-col">
+          <h3>Upload a recording</h3>
+          <p class="muted">10–30 seconds of one person speaking. WAV, MP3, FLAC, OGG, M4A or WebM.</p>
+          <input class="input" type="file" name="file" id="cloneFile" accept="audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.webm">
+        </div>
+      </div>
+      <ul class="tips">
+        <li>Quiet room, no music, no echo, no other voices. Hold the phone or mic about 20 cm (8 in) away.</li>
+        <li>The cleanest 10 seconds matter most, and the studio picks them for you.</li>
+      </ul>
+      <label class="consent"><input type="checkbox" name="consent" value="yes" required>
+        This is my voice, or the speaker has given me permission to use their voice this way.</label>
+      <div class="dialog-foot">
+        <span class="msg" id="cloneMsg"></span>
+        <button class="render-btn small" id="cloneSubmit" type="submit">Create voice</button>
+      </div>
+    </form>
   </div>
 </section>
 
@@ -395,39 +456,6 @@
   <div class="msg" id="msg" role="status" aria-live="polite"></div>
 </footer>
 
-<dialog id="voiceDialog" class="dialog" aria-labelledby="vdTitle">
-  <form method="dialog" class="dialog-body" id="cloneForm">
-    <div class="dialog-head">
-      <h2 id="vdTitle">Your voices</h2>
-      <button class="icon-btn" value="close" formnovalidate aria-label="Close">×</button>
-    </div>
-    <p class="muted">Make a voice from a short recording of a real person. The studio reproduces their sound, accent and way of speaking using Chatterbox, a voice-cloning model that runs on this computer.</p>
-    <div class="engine-state" id="cloneEngine"></div>
-    <div id="cloneList" class="clone-list"></div>
-
-    <h3>Add a voice</h3>
-    <div class="row two">
-      <label class="mini">Name<input class="input" name="name" id="cloneName" maxlength="40" placeholder="e.g. Marcus" required></label>
-      <label class="mini">Voice type
-        <select class="input" name="gender"><option value="">—</option><option>Male</option><option>Female</option></select>
-      </label>
-    </div>
-    <label class="mini">Recording <span class="muted">(WAV, MP3, FLAC, OGG; M4A with ffmpeg)</span>
-      <input class="input" type="file" name="file" id="cloneFile" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" required>
-    </label>
-    <ul class="tips">
-      <li><b>10–30 seconds</b> of one person talking naturally. The cleanest 10 seconds matter most, and the studio picks them for you.</li>
-      <li>Quiet room, no music, no echo, no other voices. A phone held about 20 cm (8 in) away works well.</li>
-      <li>Speak the way the voice should sound in your videos. A calm, warm read makes a calm, warm voice.</li>
-    </ul>
-    <label class="consent"><input type="checkbox" name="consent" value="yes" required>
-      This is my voice, or the speaker has given me permission to use their voice this way.</label>
-    <div class="dialog-foot">
-      <span class="msg" id="cloneMsg"></span>
-      <button class="render-btn small" id="cloneSubmit" value="default">Create voice</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="veExportDialog" class="dialog" aria-labelledby="veExTitle">
   <form method="dialog" class="dialog-body" id="veExportForm">

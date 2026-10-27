@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import threading
+from collections import deque
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,3 +226,44 @@ class CloneWorker:
         if self.proc and self.proc.poll() is None:
             self.proc.kill()
         self.proc = None
+
+
+class Installer:
+    """Runs setup-cloning.sh in the background so cloning can be installed from the browser."""
+
+    def __init__(self, root=None):
+        self.root = Path(root or Path(__file__).resolve().parents[1])
+        self.job = None
+        self.lock = threading.Lock()
+
+    def start(self):
+        with self.lock:
+            if self.job and self.job['status'] == 'running':
+                return self.status()
+            script = self.root / 'setup-cloning.sh'
+            if not script.exists():
+                raise RuntimeError('setup-cloning.sh is missing from the app folder.')
+            if not shutil.which('uv') and not (Path.home() / '.local' / 'bin' / 'uv').exists():
+                raise RuntimeError('The installer needs uv. Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh')
+            self.job = {'status': 'running', 'log': deque(maxlen=300), 'code': None}
+            env = {**os.environ, 'PATH': f"{Path.home() / '.local' / 'bin'}:{os.environ.get('PATH', '')}",
+                   'HF_HUB_OFFLINE': '0', 'NO_COLOR': '1', 'UV_NO_PROGRESS': '1'}
+            proc = subprocess.Popen(['bash', str(script)], cwd=str(self.root), env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+            threading.Thread(target=self._pump, args=(proc, self.job), daemon=True).start()
+        return self.status()
+
+    @staticmethod
+    def _pump(proc, job):
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                job['log'].append(line[-300:])
+        job['code'] = proc.wait()
+        job['status'] = 'done' if job['code'] == 0 else 'failed'
+
+    def status(self):
+        job = self.job
+        if not job:
+            return None
+        return {'status': job['status'], 'log': list(job['log'])[-120:], 'code': job['code']}

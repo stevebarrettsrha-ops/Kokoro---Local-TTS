@@ -376,3 +376,25 @@ def test_sentences_read_together_but_captioned_separately(engine):
 def test_flow_off_reads_sentence_by_sentence(engine):
     engine.synthesize({'text': 'One sentence goes here. Another sentence goes here.', 'flow': False, 'rate': 24000})
     assert [c['text'] for c in engine.pipelines['a'].calls] == ['One sentence goes here.', 'Another sentence goes here.']
+
+
+def test_cloning_installer_runs_setup_script(tmp_path):
+    import time
+    from studio.cloning import Installer
+    (tmp_path / 'setup-cloning.sh').write_text('echo step one\necho step two\nexit 0\n')
+    inst = Installer(tmp_path)
+    assert inst.status() is None
+    inst.start()
+    for _ in range(100):
+        if inst.status()['status'] != 'running':
+            break
+        time.sleep(0.05)
+    st = inst.status()
+    assert st['status'] == 'done' and st['log'] == ['step one', 'step two']
+    (tmp_path / 'setup-cloning.sh').write_text('echo oops\nexit 3\n')
+    inst.start()
+    for _ in range(100):
+        if inst.status()['status'] != 'running':
+            break
+        time.sleep(0.05)
+    assert inst.status()['status'] == 'failed' and inst.status()['code'] == 3

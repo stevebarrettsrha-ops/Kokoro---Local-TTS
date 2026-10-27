@@ -144,15 +144,11 @@ Pick a second voice under *Blend with*.
 
 Built-in Kokoro voices can't be changed into a different person, so the studio can also make a voice from a recording of a real speaker. This uses [Chatterbox](https://github.com/resemble-ai/chatterbox) by Resemble AI (MIT licence), which runs locally. A clone captures the speaker's sound, accent and way of speaking.
 
-**One-time setup** (stop the studio first):
-
-```bash
-./setup-cloning.sh
-```
+**One-time setup:** open the **Voices** tab and press **Install voice cloning**. Progress shows on the page while you keep working. Or, with the studio stopped, run `./setup-cloning.sh`.
 
 This creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro. It also downloads the model. Plan for about 6 GB of packages plus about 3 GB of model; the download is safe to rerun if it's interrupted. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
 
-**Adding a voice:** in the Voice panel, choose **Add a voice from a recording…**
+**Adding a voice:** in the **Voices** tab, record yourself reading the sample passage with your microphone, or upload a recording.
 
 - Upload 10–30 seconds of one person speaking naturally, in a quiet room with no music.
 - The studio finds the cleanest 10 seconds and builds the voice from those.

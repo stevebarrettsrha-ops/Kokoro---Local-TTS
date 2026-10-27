@@ -11,6 +11,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from studio.engine import Engine
+from studio.cloning import Installer
 from studio import video as vid
 
 HERE = Path(__file__).resolve().parent
@@ -19,6 +20,7 @@ OUT = HERE / 'outputs'
 ID_RE = re.compile(r'[0-9a-f]{32}')
 
 engine = Engine(OUT, HERE / 'voices')
+installer = Installer(HERE)
 CREATIONS = HERE / 'creations'  # everything the video editor makes lives here
 media = vid.MediaLibrary(CREATIONS / 'media')
 projects = vid.ProjectStore(CREATIONS / 'projects')
@@ -220,6 +222,22 @@ def add_cloned_voice():
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify({'ok': True, 'voice': voice, 'cloning': engine.cloner.status()})
+
+
+@app.get('/api/cloning/install')
+def cloning_status():
+    return jsonify({**engine.cloner.status(), 'job': installer.status()})
+
+
+@app.post('/api/cloning/install')
+def cloning_install():
+    if not request.is_json:  # JSON-only keeps other web pages from triggering it
+        return jsonify({'error': 'Send JSON to this endpoint.'}), 415
+    try:
+        job = installer.start()
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({**engine.cloner.status(), 'job': job})
 
 
 @app.get('/api/voices/clone/<slug>/sample')
