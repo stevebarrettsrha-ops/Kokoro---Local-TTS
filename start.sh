@@ -17,6 +17,39 @@ compatible_python() {
   "$1" -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 13) else 1)' >/dev/null 2>&1
 }
 
+# A .venv whose Python link is broken (e.g. uv replaced Python 3.12.x with a
+# newer patch release) still has all its packages. Re-point it at an installed
+# Python of the same version instead of reinstalling everything.
+if [ -d .venv ] && [ ! -x .venv/bin/python ]; then
+  echo 'The existing .venv has lost its link to Python; trying to repair it...'
+  venv_minor="$(ls -d .venv/lib/python3.* 2>/dev/null | head -1 | sed 's#.*/python##')"
+  new_python=''
+  if [ -n "$venv_minor" ] && command -v uv >/dev/null 2>&1; then
+    new_python="$(uv python find "$venv_minor" 2>/dev/null || true)"
+  fi
+  if [ -z "$new_python" ] && [ -n "$venv_minor" ]; then
+    new_python="$(command -v "python$venv_minor" 2>/dev/null || true)"
+  fi
+  if [ -n "$new_python" ] && [ -x "$new_python" ]; then
+    for link in python python3 "python$venv_minor"; do
+      ln -sfn "$new_python" ".venv/bin/$link"
+    done
+    if [ -f .venv/pyvenv.cfg ]; then
+      sed -i "s#^home = .*#home = $(dirname "$new_python")#" .venv/pyvenv.cfg
+    fi
+    if .venv/bin/python -c 'import flask, kokoro, scipy, soundfile' >/dev/null 2>&1; then
+      echo "Repaired .venv using $new_python (no reinstall needed)."
+    else
+      echo 'Python link repaired; any missing packages will be installed next.'
+    fi
+  fi
+  if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import sys' >/dev/null 2>&1; then
+    backup=".venv-broken-$(date +%Y%m%d-%H%M%S)"
+    echo "Could not repair it. Keeping it as $backup and building a fresh one."
+    mv .venv "$backup"
+  fi
+fi
+
 # Reusing a venv made by Ubuntu's default Python 3.14 would fail even after
 # installing Python 3.12. Preserve the old environment instead of deleting it.
 if [ -x .venv/bin/python ] && ! compatible_python .venv/bin/python; then
@@ -38,7 +71,7 @@ if [ ! -x .venv/bin/python ]; then
   echo 'Creating Kokoro Python environment (3.12 preferred)...'
   # 'uv' downloads its own Python 3.12 without replacing /usr/bin/python3.
   if command -v uv >/dev/null 2>&1; then
-    uv venv --python 3.12 .venv
+    uv venv --clear --python 3.12 .venv
   else
     python_candidate=''
     for candidate in python3.12 python3.11 python3.10; do
