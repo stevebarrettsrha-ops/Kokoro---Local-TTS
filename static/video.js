@@ -57,8 +57,10 @@ const MOTION = {fade: [0, 0, 1, 1], rise: [0, 0.06, 1, 1], drop: [0, -0.06, 1, 1
   'slide-right': [-1, 0, 1, 0], 'slide-up': [0, 1, 1, 0], 'slide-down': [0, -1, 1, 0], pop: [0, 0, 0.5, 0.5], 'zoom-out': [0, 0, 1.3, 1]};
 const ANIM_LABELS = {none: 'None', fade: 'Fade', rise: 'Rise', drop: 'Drop', 'slide-left': 'Slide left', 'slide-right': 'Slide right',
   'slide-up': 'Slide up', 'slide-down': 'Slide down', pop: 'Pop', 'zoom-out': 'Zoom'};
-const TRANSITION_LABELS = {none: 'None', crossfade: 'Crossfade', dip: 'Dip to background', 'slide-left': 'Slide left', 'slide-right': 'Slide right',
-  'slide-up': 'Slide up', 'slide-down': 'Slide down', zoom: 'Zoom'};
+const TRANSITION_LABELS = {none: 'None', crossfade: 'Dissolve', dip: 'Dip to background', 'slide-left': 'Slide left', 'slide-right': 'Slide right',
+  'slide-up': 'Slide up', 'slide-down': 'Slide down', 'wipe-left': 'Line wipe ←', 'wipe-right': 'Line wipe →', 'wipe-up': 'Line wipe ↑',
+  'wipe-down': 'Line wipe ↓', circle: 'Circle wipe', clock: 'Clock wipe', 'split-v': 'Split open ↔', 'split-h': 'Split open ↕', zoom: 'Zoom'};
+const MASK_TRANSITIONS = ['wipe-left', 'wipe-right', 'wipe-up', 'wipe-down', 'circle', 'clock', 'split-v', 'split-h'];
 const TRANSITION_ANIM = {crossfade: 'fade', 'slide-left': 'slide-left', 'slide-right': 'slide-right', 'slide-up': 'slide-up', 'slide-down': 'slide-down', zoom: 'zoom-out'};
 /* Same rules as studio/video.py motion_plan(): a transition on clip B holds the clip A that ends
    where B starts (same track) on screen under B while B animates in. */
@@ -69,16 +71,36 @@ function prevAdjacent(p, b) {
 function motionPlan(p) {
   const plan = {};
   const vis = p.clips.filter(c => c.kind !== 'audio');
-  for (const c of vis) plan[c.id] = {ext: 0, in: c.anim_in?.type && c.anim_in.type !== 'none' ? [c.anim_in.type, c.anim_in.dur] : null,
+  for (const c of vis) plan[c.id] = {ext: 0, mask: null, in: c.anim_in?.type && c.anim_in.type !== 'none' ? [c.anim_in.type, c.anim_in.dur] : null,
     out: c.anim_out?.type && c.anim_out.type !== 'none' ? [c.anim_out.type, c.anim_out.dur] : null};
   for (const b of vis) {
     const tr = b.transition; if (!tr || !tr.type || tr.type === 'none') continue;
     const a = prevAdjacent(p, b); if (!a) continue;
     let d = Math.min(tr.dur, b.duration * 0.9);
+    if (MASK_TRANSITIONS.includes(tr.type)) { plan[a.id].ext = Math.max(plan[a.id].ext, d); plan[b.id].mask = [tr.type, d]; continue; }
     if (tr.type === 'dip') { d = Math.min(d, a.duration * 0.9); plan[a.id].out = ['fade', d / 2]; plan[b.id].in = ['fade', d / 2]; }
     else { plan[a.id].ext = Math.max(plan[a.id].ext, d); plan[b.id].in = [TRANSITION_ANIM[tr.type], d]; }
   }
   return plan;
+}
+/* Clip the canvas to the revealed part of a clip during a wipe-type transition (same shapes as export). */
+function applyMask(ctx, c, mp, t, W, H) {
+  if (!mp.mask) return;
+  const [kind, d] = mp.mask, p = clamp((t - c.start) / d, 0, 1);
+  if (p >= 1) return;
+  const e = p * p * (3 - 2 * p);
+  const [x, y, w, h] = c.kind === 'text' ? [0, 0, W, H] : [c.x * W, c.y * H, c.w * W, c.h * H];
+  const cx = x + w / 2, cy = y + h / 2;
+  ctx.beginPath();
+  if (kind === 'wipe-right') ctx.rect(x, y, w * e, h);
+  else if (kind === 'wipe-left') ctx.rect(x + w * (1 - e), y, w * e, h);
+  else if (kind === 'wipe-down') ctx.rect(x, y, w, h * e);
+  else if (kind === 'wipe-up') ctx.rect(x, y + h * (1 - e), w, h * e);
+  else if (kind === 'circle') ctx.arc(cx, cy, Math.max(0.01, e * Math.hypot(w / 2, h / 2)), 0, Math.PI * 2);
+  else if (kind === 'split-v') ctx.rect(cx - w / 2 * e, y, w * e, h);
+  else if (kind === 'split-h') ctx.rect(x, cy - h / 2 * e, w, h * e);
+  else if (kind === 'clock') { ctx.moveTo(cx, cy); ctx.arc(cx, cy, Math.hypot(w, h), -Math.PI / 2, -Math.PI / 2 + e * Math.PI * 2); ctx.closePath(); }
+  ctx.clip();
 }
 function motionAt(c, mp, t) {
   const end = c.start + c.duration + mp.ext;
@@ -574,6 +596,7 @@ function draw() {
     ctx.save();
     ctx.translate(m.dx * W, m.dy * H);
     if (m.sc !== 1) { const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H; ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.translate(-cx, -cy); }
+    applyMask(ctx, c, plan[c.id], t, W, H);
     ctx.globalAlpha = c.opacity * (t < c.start + c.duration ? fadeFactor(c, t) : (c.fade_out > 0 ? 0 : 1)) * m.a;
     if (c.kind === 'color') {
       ctx.fillStyle = hexToRgba(c.color); ctx.fillRect(c.x * W, c.y * H, c.w * W, c.h * H);

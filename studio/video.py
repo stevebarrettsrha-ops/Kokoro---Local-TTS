@@ -36,7 +36,8 @@ KINDS = {'video', 'image', 'text', 'color', 'audio'}
 FORMATS = {'16:9': (1920, 1080), '9:16': (1080, 1920), '1:1': (1080, 1080), '4:5': (1080, 1350)}
 MAX_CLIPS = 600
 ANIMS = ('none', 'fade', 'rise', 'drop', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'pop', 'zoom-out')
-TRANSITIONS = ('none', 'crossfade', 'dip', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom')
+MASK_TRANSITIONS = ('wipe-left', 'wipe-right', 'wipe-up', 'wipe-down', 'circle', 'clock', 'split-v', 'split-h')
+TRANSITIONS = ('none', 'crossfade', 'dip', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom') + MASK_TRANSITIONS
 # Motion of an animation: (dx, dy) in frame widths/heights at the start, scale at the start, alpha share.
 MOTION = {'fade': (0, 0, 1, 1), 'rise': (0, 0.06, 1, 1), 'drop': (0, -0.06, 1, 1), 'slide-left': (1, 0, 1, 0),
           'slide-right': (-1, 0, 1, 0), 'slide-up': (0, 1, 1, 0), 'slide-down': (0, -1, 1, 0), 'pop': (0, 0, 0.5, 0.5),
@@ -517,7 +518,7 @@ def motion_plan(project):
     plan = {}
     for c in visual:
         ai, ao = c.get('anim_in') or {}, c.get('anim_out') or {}
-        plan[c['id']] = {'ext': 0.0,
+        plan[c['id']] = {'ext': 0.0, 'mask': None,
                          'in': (ai['type'], ai['dur']) if ai.get('type', 'none') != 'none' else None,
                          'out': (ao['type'], ao['dur']) if ao.get('type', 'none') != 'none' else None}
     for b in visual:
@@ -529,6 +530,10 @@ def motion_plan(project):
             continue
         a = max(prev, key=lambda x: x['start'])
         d = min(tr['dur'], b['duration'] * 0.9)
+        if tr['type'] in MASK_TRANSITIONS:  # B is revealed through a moving shape over the held A
+            plan[a['id']]['ext'] = max(plan[a['id']]['ext'], d)
+            plan[b['id']]['mask'] = (tr['type'], d)
+            continue
         if tr['type'] == 'dip':
             d = min(d, a['duration'] * 0.9)
             plan[a['id']]['out'] = ('fade', d / 2)
@@ -537,6 +542,34 @@ def motion_plan(project):
             plan[a['id']]['ext'] = max(plan[a['id']]['ext'], d)
             plan[b['id']]['in'] = (TRANSITION_ANIM[tr['type']], d)
     return plan
+
+
+def _mask_alpha(kind, d):
+    """geq alpha expression revealing a clip during the first `d` seconds (T = local time)."""
+    p = f'clip(T/{d:.3f},0,1)'
+    e = f'({p}*{p}*(3-2*{p}))'  # smoothstep
+    soft = '(max(W,H)*0.03)'
+
+    def reveal(dist, span):  # 1 where dist < moving edge, with a soft edge
+        return f'clip(({e}*({span}+{soft})-{soft}/2-({dist}))/{soft}+0.5,0,1)'
+    if kind == 'wipe-right':
+        return reveal('X', 'W')
+    if kind == 'wipe-left':
+        return reveal('(W-X)', 'W')
+    if kind == 'wipe-down':
+        return reveal('Y', 'H')
+    if kind == 'wipe-up':
+        return reveal('(H-Y)', 'H')
+    if kind == 'circle':
+        return reveal('hypot(X-W/2,Y-H/2)', 'hypot(W/2,H/2)')
+    if kind == 'split-v':
+        return reveal('abs(X-W/2)', 'W/2')
+    if kind == 'split-h':
+        return reveal('abs(Y-H/2)', 'H/2')
+    if kind == 'clock':
+        ang = 'mod(atan2(X-W/2,H/2-Y)+2*PI,2*PI)'
+        return f'clip(({e}*2.04*PI-{ang})/0.06,0,1)'
+    return '1'
 
 
 def _motion_exprs(start, rdur, anim_in, anim_out):
@@ -662,6 +695,7 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 d = min(anim[1] * MOTION[anim[0]][3], dur)
                 st_ = 0 if which == 'in' else dur - d
                 chain.append(f'fade=t={which}:st={st_:.3f}:d={d:.3f}:alpha=1')
+        split_at = len(chain)
         dx, dy, scale = _motion_exprs(start, dur, mp['in'], mp['out'])
         ow, oh = text_box or ((bw, bh) if c['kind'] != 'text' else (W, H))
         if scale:
@@ -669,7 +703,17 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             chain.append(f"scale=w='trunc(max(2,{ow}*{scale})/2)*2':h='trunc(max(2,{oh}*{scale})/2)*2':eval=frame")
             chain.append(f'pad=w={pw}:h={ph}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame')
         chain.append(f'setpts=PTS-STARTPTS+{start:.3f}/TB')
-        fc.append(f'[{idx}:v]' + ','.join(chain) + f'[v{k}]')
+        mask = mp.get('mask')
+        if mask and mask[1] < dur - 0.05:
+            # Only the transition's first moments go through the (slow) per-pixel mask.
+            d = mask[1]
+            fc.append(f'[{idx}:v]' + ','.join(chain[:split_at]) + f',split[mA{k}][mB{k}]')
+            fc.append(f"[mA{k}]trim=0:{d:.3f},setpts=PTS-STARTPTS,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                      f"a='alpha(X,Y)*{_mask_alpha(mask[0], d)}'[mC{k}]")
+            fc.append(f'[mB{k}]trim=start={d:.3f},setpts=PTS-STARTPTS[mD{k}]')
+            fc.append(f'[mC{k}][mD{k}]concat=n=2:v=1:a=0,' + ','.join(chain[split_at:]) + f'[v{k}]')
+        else:
+            fc.append(f'[{idx}:v]' + ','.join(chain) + f'[v{k}]')
         nxt = f'base{k + 1}'
         x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (scale or dx != '0') else str(bx)
         y = f"{by}+{H}*({dy})-(h-{oh})/2" if (scale or dy != '0') else str(by)

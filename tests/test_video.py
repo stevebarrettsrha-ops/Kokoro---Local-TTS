@@ -155,10 +155,16 @@ def test_motion_plan_transitions_and_animations():
         {'id': 't', 'kind': 'text', 'start': 1, 'duration': 2, 'anim_in': {'type': 'pop', 'dur': 0.5}, 'anim_out': {'type': 'bogus'}},
     ]})
     plan = vid.motion_plan(p)
-    assert plan['a'] == {'ext': 1.0, 'in': None, 'out': None}
+    assert plan['a'] == {'ext': 1.0, 'mask': None, 'in': None, 'out': None}
     assert plan['b']['in'] == ('fade', 1.0) and plan['b']['out'] == ('fade', 0.5)
     assert plan['c']['in'] == ('fade', 0.5) and plan['d']['in'] is None
-    assert plan['t'] == {'ext': 0.0, 'in': ('pop', 0.5), 'out': None}
+    assert plan['t'] == {'ext': 0.0, 'mask': None, 'in': ('pop', 0.5), 'out': None}
+    wipe = vid.sanitize_project({'clips': [{'id': 'a', 'kind': 'color', 'start': 0, 'duration': 2},
+                                           {'id': 'b', 'kind': 'color', 'start': 2, 'duration': 2, 'transition': {'type': 'circle', 'dur': 0.8}}]})
+    wp = vid.motion_plan(wipe)
+    assert wp['a']['ext'] == 0.8 and wp['b']['mask'] == ('circle', 0.8) and wp['b']['in'] is None
+    for kind in vid.MASK_TRANSITIONS:
+        assert vid._mask_alpha(kind, 0.5) != '1'
 
 
 def test_export_with_every_transition_and_animation(tmp_path, assets):
