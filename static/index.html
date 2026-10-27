@@ -335,7 +335,7 @@
           <button class="icon-btn play" id="vePlay" aria-label="Play">▶</button>
           <span class="mono clock" id="veClock">0:00.0 / 0:00.0</span>
           <span class="grow"></span>
-          <span class="muted ve-hint">Space play · S split · Del delete · Ctrl+D duplicate</span>
+          <span class="muted ve-hint">Space play · S split · Q/W trim to playhead · Alt+drag slip · Ctrl+C/V</span>
         </div>
       </div>
 
@@ -345,9 +345,12 @@
     <div class="ve-timeline">
       <div class="ve-tl-tools">
         <button class="btn ghost" id="veSplit" title="Split at playhead (S)">Split</button>
+        <button class="btn ghost" id="veTrimS" title="Trim the selected clip's start to the playhead (Q)">Trim start</button>
+        <button class="btn ghost" id="veTrimE" title="Trim the selected clip's end to the playhead (W)">Trim end</button>
         <button class="btn ghost" id="veDup" title="Duplicate (Ctrl+D)">Duplicate</button>
         <button class="btn ghost" id="veDel" title="Delete (Del)">Delete</button>
         <label class="mini inline"><input type="checkbox" id="veSnap" checked> Snap</label>
+        <label class="mini inline" title="Clips on the Main track play back to back: deleting or trimming closes the gap"><input type="checkbox" id="veMagnet" checked> Magnetic main track</label>
         <span class="grow"></span>
         <label class="mini inline">Zoom <input type="range" id="veZoom" min="8" max="240" value="60"></label>
       </div>

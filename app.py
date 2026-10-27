@@ -331,6 +331,26 @@ def media_thumb(mid):
     return send_file(path, mimetype='image/jpeg')
 
 
+@app.get('/api/media/<mid>/peaks')
+def media_peaks(mid):
+    data = media.peaks(mid)
+    return jsonify(data) if data is not None else abort(404)
+
+
+@app.post('/api/media/<mid>/frame')
+def media_frame(mid):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({'media': media.freeze_frame(mid, body.get('t', 0))})
+    except (ValueError, TypeError) as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.get('/api/recordings/<rid>/peaks')
+def take_peaks(rid):
+    return jsonify(vid.cached_peaks(_take_path(rid, 'wav'), OUT / f'{rid}.peaks.json'))
+
+
 @app.patch('/api/media/<mid>')
 def media_rename(mid):
     meta = media.rename(mid, (request.get_json(silent=True) or {}).get('name', ''))

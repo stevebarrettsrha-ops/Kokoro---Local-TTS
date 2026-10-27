@@ -99,7 +99,8 @@ function motionAt(c, mp, t) {
 const st = {
   project: null, sel: null, time: 0, playing: false, pps: 60, snap: true,
   undo: [], redo: [], media: {}, takes: {}, els: {}, imgs: {}, saveTimer: 0, saving: false, dirty: false,
-  clock0: 0, time0: 0, raf: 0, ready: false, shown: false, job: null,
+  clock0: 0, time0: 0, raf: 0, ready: false, shown: false, job: null, peaks: {}, clipboard: null,
+  magnet: store.get('ve-magnet', true),
 };
 
 /* ---------------------------------------------------------------- data */
@@ -148,7 +149,15 @@ function commit(fn, {save = true} = {}) {
   fn(P());
   afterChange(save);
 }
+/* Magnetic Main track (like Canva's scenes): clips on Main play back to back, so deleting or
+   trimming one closes the gap and dragging one reorders the sequence. */
+function packMain(p) {
+  if (!st.magnet) return;
+  let t = 0;
+  p.clips.filter(c => c.lane === 'V1').sort((a, b) => a.start - b.start).forEach(c => { c.start = Math.round(t * 1000) / 1000; t += c.duration; });
+}
 function afterChange(save = true) {
+  packMain(P());
   pruneElements(); renderAll();
   if (save) scheduleSave();
 }
@@ -184,7 +193,8 @@ function freeLane(candidates, start, dur, ignore) {
 function laneEnd(lane) { return Math.max(0, ...P().clips.filter(c => c.lane === lane).map(c => c.start + c.duration)); }
 
 function addClip(clip, {select = true} = {}) {
-  const c = {id: uid(), x: 0, y: 0, w: 1, h: 1, fit: 'cover', opacity: 1, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false, in: 0, ...clip};
+  const c = {id: uid(), x: 0, y: 0, w: 1, h: 1, fit: 'cover', opacity: 1, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false, in: 0,
+    speed: 1, loop: false, ...clip};
   commit(p => p.clips.push(c));
   if (select) select_(c.id);
   return c;
@@ -202,7 +212,8 @@ function addMedia(meta, at = null, laneHint = null) {
   if (!lane) {
     // Like scenes in Canva: pictures and clips play one after another on the Main track.
     lane = 'V1';
-    if (!freeLane(['V1'], t, dur)) start = laneEnd('V1');
+    const under = P().clips.find(c => c.lane === 'V1' && t >= c.start && t < c.start + c.duration);
+    if (under) start = st.magnet ? under.start + under.duration - 0.001 : laneEnd('V1');
   }
   const fit = fitFor(meta);
   return addClip({kind: meta.kind, media: meta.id, lane, start, duration: dur, name: meta.name, fit});
@@ -410,8 +421,18 @@ function elementFor(c) {
   }
   return el;
 }
+/* Where in the source file the playhead is: honours speed, looping and the frozen tail. */
+function sourceTime(c, el, t) {
+  const src = el?.duration || sourceDuration(c);
+  let x = c.in + Math.max(0, t - c.start) * (c.speed || 1);
+  if (Number.isFinite(src) && x >= src - 0.03) {
+    if (c.loop && src > 0.1) x = (x - src) % src;
+    else return {t: Math.max(0, src - 0.05), frozen: true};
+  }
+  return {t: x, frozen: false};
+}
 function seekEl(c, el, t) {
-  const want = c.in + (t - c.start);
+  const want = sourceTime(c, el, t).t;
   if (el.readyState >= 1 && Math.abs(el.currentTime - want) > 0.04) { try { el.currentTime = Math.max(0, want); } catch { /* */ } }
 }
 function fadeFactor(c, t) {
@@ -432,10 +453,12 @@ function syncMedia(t, playing) {
     el.muted = silent;
     el.volume = clamp(c.volume * fadeFactor(c, t), 0, 1);
     if (!active) { if (!el.paused) el.pause(); continue; }
+    el.playbackRate = c.speed || 1;
+    const want = sourceTime(c, el, t);
     if (playing) {
-      const want = Math.min(c.in + (t - c.start), (el.duration || 1e9) - 0.05);
-      if (el.paused) { if (Math.abs(el.currentTime - want) > 0.05) el.currentTime = want; el.play().catch(() => {}); }
-      else if (Math.abs(el.currentTime - want) > 0.25) el.currentTime = want;
+      if (want.frozen) { if (!el.paused) el.pause(); if (Math.abs(el.currentTime - want.t) > 0.05) el.currentTime = want.t; }
+      else if (el.paused) { if (Math.abs(el.currentTime - want.t) > 0.05) el.currentTime = want.t; el.play().catch(() => {}); }
+      else if (Math.abs(el.currentTime - want.t) > 0.25) el.currentTime = want.t;
     } else {
       if (!el.paused) el.pause();
       seekEl(c, el, t);
@@ -649,6 +672,26 @@ function junctions(lane) {
       title="${on ? 'Transition: ' + TRANSITION_LABELS[c.transition.type] : 'Add a transition'}">${on ? '⧓' : '+'}</button>`;
   }).join('');
 }
+function peaksKey(c) { return c.media?.startsWith('take:') ? c.media : c.media; }
+function waveSvg(c) {
+  const key = peaksKey(c), pk = st.peaks[key];
+  if (pk === undefined) {
+    st.peaks[key] = null;
+    const url = key.startsWith('take:') ? `/api/recordings/${key.slice(5)}/peaks` : `/api/media/${key}/peaks`;
+    api(url).then(d => { st.peaks[key] = d; renderTimeline(); }).catch(() => { st.peaks[key] = {peaks: [], per_second: 40}; });
+    return '';
+  }
+  if (!pk || !pk.peaks.length) return '';
+  const w = Math.max(6, c.duration * st.pps), n = Math.min(600, Math.max(8, Math.floor(w / 2))), src = pk.peaks.length / pk.per_second;
+  let d = '';
+  for (let i = 0; i <= n; i++) {
+    let x = c.in + (i / n) * c.duration * (c.speed || 1);
+    if (x >= src) { if (!c.loop) break; x %= src; }
+    const v = pk.peaks[Math.min(pk.peaks.length - 1, Math.floor(x * pk.per_second))] / 100;
+    d += `M${(i / n * 100).toFixed(2)} ${(50 - v * 46).toFixed(1)}V${(50 + v * 46).toFixed(1)}`;
+  }
+  return `<svg class="wave" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"/></svg>`;
+}
 function clipHtml(c) {
   const left = c.start * st.pps, w = Math.max(6, c.duration * st.pps);
   let inner = '', bg = '';
@@ -665,6 +708,12 @@ function clipHtml(c) {
       void span;
     }
   }
+  if (c.kind === 'audio' || (c.kind === 'video' && !c.muted && st.media[c.media]?.has_audio)) inner += waveSvg(c);
+  if (c.kind === 'video' && Number.isFinite(sourceDuration(c)) && !c.loop) {
+    const playable = (sourceDuration(c) - c.in) / (c.speed || 1);
+    if (playable < c.duration - 0.05) inner += `<span class="frozen" style="left:${Math.max(0, playable) * st.pps}px" title="Last frame held"></span>`;
+  }
+  if ((c.speed || 1) !== 1) inner += `<em class="spd">${(+c.speed).toFixed(2).replace(/0$/, '')}×</em>`;
   const fades = (c.fade_in ? `<b class="fi" style="width:${c.fade_in * st.pps}px"></b>` : '') + (c.fade_out ? `<b class="fo" style="width:${c.fade_out * st.pps}px"></b>` : '');
   return `<div class="ve-clip ${c.kind}${c.media?.startsWith('take:') ? ' take' : ''}${st.sel === c.id ? ' sel' : ''}" data-clip="${c.id}" style="left:${left}px;width:${w}px;${bg}" title="${esc(clipName(c))} · ${c.duration.toFixed(1)}s">
     ${inner}${fades}<span class="lbl">${c.muted ? '🔇 ' : ''}${esc(clipName(c))}</span><s class="eh l"></s><s class="eh r"></s></div>`;
@@ -712,9 +761,13 @@ function clipPointerDown(e) {
   const el = e.currentTarget, c = clipById(el.dataset.clip);
   if (!c) return;
   select_(c.id);
-  const mode = e.target.classList.contains('eh') ? (e.target.classList.contains('l') ? 'trimL' : 'trimR') : 'move';
+  const media = c.kind === 'video' || c.kind === 'audio';
+  const mode = e.target.classList.contains('eh') ? (e.target.classList.contains('l') ? 'trimL' : 'trimR')
+    : (e.altKey && media ? 'slip' : 'move');
   const x0 = e.clientX, orig = {...c}, before = snapshot();
-  const srcDur = c.kind === 'video' || (c.kind === 'audio') ? sourceDuration(c) : Infinity;
+  const sp = c.speed || 1, src = media ? sourceDuration(c) : Infinity;
+  // Pictures, text and video can be stretched freely (video holds its last frame); audio stops at its end unless looped.
+  const maxDur = c.kind === 'audio' && !c.loop ? (src - orig.in) / sp : Infinity;
   let moved = false;
   const onMove = ev => {
     const dt = (ev.clientX - x0) / st.pps;
@@ -729,13 +782,17 @@ function clipPointerDown(e) {
       if (under && laneOf(under.dataset.lane).kinds.includes(c.kind)) c.lane = under.dataset.lane;
     } else if (mode === 'trimR') {
       const end = snapTime(orig.start + orig.duration + dt, c.id);
-      c.duration = clamp(end - orig.start, 0.1, srcDur - orig.in);
+      c.duration = clamp(end - orig.start, 0.1, maxDur);
+    } else if (mode === 'slip') {
+      // Keep the clip where it is; slide which part of the source plays inside it.
+      const room = c.loop ? Infinity : Math.max(0, src - orig.duration * sp);
+      c.in = clamp(orig.in - dt * sp, 0, c.kind === 'video' ? Math.max(0, src - 0.1) : room);
     } else {
       let ns = snapTime(orig.start + dt, c.id);
-      ns = clamp(ns, Math.max(0, orig.start - (c.kind === 'video' || c.kind === 'audio' ? orig.in : 1e9)), orig.start + orig.duration - 0.1);
+      ns = clamp(ns, Math.max(0, orig.start - (media ? orig.in / sp : 1e9)), orig.start + orig.duration - 0.1);
       const shift = ns - orig.start;
       c.start = ns; c.duration = orig.duration - shift;
-      if (c.kind === 'video' || c.kind === 'audio') c.in = Math.max(0, orig.in + shift);
+      if (media) c.in = Math.max(0, orig.in + shift * sp);
     }
     renderTimeline(); renderProps(); syncMedia(st.time, false);
   };
@@ -893,10 +950,17 @@ function renderProps() {
   if (media) {
     html += `<h3>Sound</h3><div class="slider"><label>Volume</label><output>${Math.round(c.volume * 100)}%</output><input type="range" min="0" max="2" step="0.01" value="${c.volume}" data-k="volume"></div>
       <div class="checks small"><label><input type="checkbox" data-muted ${c.muted ? 'checked' : ''}> Mute</label></div>
-      ${field('Starts from (s into the file)', `<input class="input mono" type="number" step="0.1" min="0" data-k="in">`)}`;
+      ${field('Starts from (s into the file)', `<input class="input mono" type="number" step="0.1" min="0" data-k="in">`)}
+      <p class="note">Alt + drag the clip on the timeline to choose which part plays.</p>`;
+    html += `<h3>Speed</h3><div class="slider"><label>Playback speed</label><output>${(c.speed || 1).toFixed(2)}×</output>
+      <input type="range" min="0.25" max="2" step="0.05" value="${c.speed || 1}" data-speed></div>
+      <div class="ve-btnrow">${[0.5, 1, 1.5, 2].map(v => `<button type="button" class="btn ghost" data-speedset="${v}">${v}×</button>`).join('')}</div>
+      <div class="checks small"><label><input type="checkbox" data-loop ${c.loop ? 'checked' : ''}> Loop to fill the clip</label></div>`;
+    if (c.kind === 'video') html += `<button type="button" class="btn ghost wide" data-act="freeze">Freeze frame at playhead (2 s)</button>`;
   }
   if (c.media?.startsWith('take:')) html += `<button type="button" class="btn ghost wide" data-act="captions">Add captions as text</button>`;
-  html += `<div class="row ve-btnrow end"><button type="button" class="btn ghost" data-act="split">Split</button><button type="button" class="btn ghost" data-act="dup">Duplicate</button><button type="button" class="btn ghost danger" data-act="del">Delete</button></div>`;
+  html += `<div class="row ve-btnrow end"><button type="button" class="btn ghost" data-act="trimstart" title="Q">Trim start to playhead</button><button type="button" class="btn ghost" data-act="trimend" title="W">Trim end to playhead</button></div>
+    <div class="row ve-btnrow"><button type="button" class="btn ghost" data-act="split">Split</button><button type="button" class="btn ghost" data-act="dup">Duplicate</button><button type="button" class="btn ghost danger" data-act="del">Delete</button></div>`;
   box.innerHTML = html;
   renderPropsValues();
   bindProps(c);
@@ -969,6 +1033,15 @@ function bindProps(c) {
   box.querySelectorAll('[data-animdur]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.animdur; c[k] = {type: c[k]?.type || 'fade', dur: clamp(+el.value || 0.6, 0.1, 5)}; })));
   box.querySelector('[data-lane]')?.addEventListener('change', e => commit(() => { c.lane = e.target.value; }));
   box.querySelector('[data-muted]')?.addEventListener('change', e => commit(() => { c.muted = e.target.checked; }));
+  const setSpeed = v => commit(() => {
+    // Like Canva: faster playback makes the clip shorter (same part of the source plays).
+    const old = c.speed || 1; c.speed = clamp(+v, 0.25, 2);
+    c.duration = Math.max(0.1, Math.round(c.duration * old / c.speed * 1000) / 1000);
+  });
+  box.querySelector('[data-speed]')?.addEventListener('input', e => { e.target.parentElement.querySelector('output').textContent = (+e.target.value).toFixed(2) + '×'; });
+  box.querySelector('[data-speed]')?.addEventListener('change', e => setSpeed(e.target.value));
+  box.querySelectorAll('[data-speedset]').forEach(b => b.onclick = () => setSpeed(b.dataset.speedset));
+  box.querySelector('[data-loop]')?.addEventListener('change', e => commit(() => { c.loop = e.target.checked; }));
   box.querySelectorAll('[data-act]').forEach(el => el.onclick = () => {
     const a = el.dataset.act;
     if (a === 'fill') commit(() => Object.assign(c, {x: 0, y: 0, w: 1, h: 1}));
@@ -977,6 +1050,9 @@ function bindProps(c) {
     if (a === 'trall') commit(p => { p.clips.forEach(x => { if (x.lane === c.lane && x.kind !== 'audio' && prevAdjacent(p, x)) x.transition = {...c.transition}; }); });
     if (a === 'preview-anim') { seek(Math.max(0, c.start - (prevAdjacent(P(), c) ? 1 : 0.3))); play(); setTimeout(() => { if (st.playing && st.time > c.start + c.duration + 0.4) stop(); }, (c.duration + 1.6) * 1000); }
     if (a === 'split') split();
+    if (a === 'trimstart') trimToPlayhead('start');
+    if (a === 'trimend') trimToPlayhead('end');
+    if (a === 'freeze') freezeFrame();
     if (a === 'dup') duplicate();
     if (a === 'del') remove();
   });
@@ -990,6 +1066,57 @@ function split() {
   if (c.kind === 'video' || c.kind === 'audio') b.in = c.in + (t - c.start);
   commit(p => { const a = p.clips.find(x => x.id === c.id); a.duration = t - a.start; a.fade_out = 0; p.clips.push(b); });
   select_(b.id);
+}
+function trimToPlayhead(which) {
+  const c = clipById(st.sel), t = st.time;
+  if (!c || t <= c.start + 0.05 || t >= c.start + c.duration - 0.05) { K.toast('Put the playhead inside the selected clip first.'); return; }
+  commit(() => {
+    if (which === 'end') { c.duration = t - c.start; return; }
+    const cut = t - c.start;
+    if (c.kind === 'video' || c.kind === 'audio') c.in += cut * (c.speed || 1);
+    c.start = t; c.duration -= cut;
+  });
+}
+async function freezeFrame() {
+  const c = clipById(st.sel), t = st.time;
+  if (!c || c.kind !== 'video') return;
+  if (t < c.start || t > c.start + c.duration) { K.toast('Put the playhead on the video first.'); return; }
+  const at = sourceTime(c, st.els[c.id], t).t;
+  let still;
+  try { still = (await jsonPost(`/api/media/${c.media}/frame`, {t: at})).media; } catch (err) { K.toast(err.message); return; }
+  st.media[still.id] = still; renderBin();
+  const hold = 2;
+  commit(p => {
+    const inside = t > c.start + 0.05 && t < c.start + c.duration - 0.05;
+    let after = null;
+    if (inside) {  // split, then put the still between the halves
+      after = {...JSON.parse(JSON.stringify(c)), id: uid(), start: t, duration: c.start + c.duration - t, fade_in: 0, transition: {type: 'none', dur: 0.6}};
+      after.in = c.in + (t - c.start) * (c.speed || 1);
+      c.duration = t - c.start; c.fade_out = 0;
+      p.clips.push(after);
+    }
+    // Make room on this track, then drop the still in.
+    p.clips.filter(x => x.lane === c.lane && x !== c && x.start >= t - 0.001).forEach(x => { x.start += hold; });
+    p.clips.push({id: uid(), kind: 'image', media: still.id, name: still.name, lane: c.lane, start: t, duration: hold,
+      x: c.x, y: c.y, w: c.w, h: c.h, fit: c.fit, opacity: c.opacity, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false,
+      in: 0, speed: 1, loop: false});
+  });
+  K.toast('Frozen frame added (2 s). Drag its edge to make it longer.');
+}
+function copy() {
+  const c = clipById(st.sel); if (!c) return;
+  st.clipboard = JSON.parse(JSON.stringify(c)); K.toast('Copied. Ctrl+V pastes at the playhead.');
+}
+function paste() {
+  if (!st.clipboard) return;
+  const d = {...JSON.parse(JSON.stringify(st.clipboard)), id: uid(), start: st.time};
+  const lanes = d.kind === 'audio' ? [d.lane, 'A1', 'A2', 'A3'] : [d.lane, 'V2', 'V3', 'T1', 'V1'];
+  d.lane = freeLane(lanes, d.start, d.duration) || d.lane;
+  if (d.lane === 'V1' && st.magnet) {
+    const under = P().clips.find(x => x.lane === 'V1' && st.time >= x.start && st.time < x.start + x.duration);
+    if (under) d.start = under.start + under.duration - 0.001;
+  }
+  commit(p => p.clips.push(d)); select_(d.id);
 }
 function duplicate() {
   const c = clipById(st.sel); if (!c) return;
@@ -1005,6 +1132,9 @@ function remove() {
   select_(null);
 }
 $('#veSplit').onclick = split; $('#veDup').onclick = duplicate; $('#veDel').onclick = remove;
+$('#veTrimS').onclick = () => trimToPlayhead('start'); $('#veTrimE').onclick = () => trimToPlayhead('end');
+$('#veMagnet').checked = st.magnet;
+$('#veMagnet').onchange = e => { st.magnet = e.target.checked; store.set('ve-magnet', st.magnet); if (st.magnet) commit(() => {}); };
 $('#veUndo').onclick = undo; $('#veRedo').onclick = redo;
 
 document.addEventListener('keydown', e => {
@@ -1015,10 +1145,16 @@ document.addEventListener('keydown', e => {
   if (mod && e.key.toLowerCase() === 'y') { if (typing) return; e.preventDefault(); redo(); return; }
   if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicate(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
+  if (mod && e.key.toLowerCase() === 'c' && !typing) { e.preventDefault(); copy(); return; }
+  if (mod && e.key.toLowerCase() === 'v' && !typing) { e.preventDefault(); paste(); return; }
+  if (mod && e.key.toLowerCase() === 'x' && !typing) { e.preventDefault(); copy(); remove(); return; }
   if (typing) return;
   if (e.key === ' ') { e.preventDefault(); st.playing ? stop() : play(); }
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(); }
   else if (e.key.toLowerCase() === 's') split();
+  else if (e.key.toLowerCase() === 'q') trimToPlayhead('start');
+  else if (e.key.toLowerCase() === 'w') trimToPlayhead('end');
+  else if (e.key.toLowerCase() === 'm') { const c = clipById(st.sel); if (c && (c.kind === 'video' || c.kind === 'audio')) commit(() => { c.muted = !c.muted; }); }
   else if (e.key === 'ArrowLeft') seek(st.time - (e.shiftKey ? 1 : 1 / P().fps));
   else if (e.key === 'ArrowRight') seek(st.time + (e.shiftKey ? 1 : 1 / P().fps));
   else if (e.key === 'Home') seek(0);

@@ -156,12 +156,20 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 .ve-cam { width: 100%; max-height: 55vh; background: #000; border-radius: var(--radius); transform: scaleX(-1); }
 .ve-btnrow .seg-toggle { flex: 0 0 auto; }
 .ve-btnrow .seg-toggle button { padding: 4px 10px; flex: none; }
-.ve-tr { position: absolute; top: 4px; width: 18px; height: 18px; margin-left: -9px; z-index: 3; border-radius: 50%; border: 1px solid var(--line-strong);
+.ve-tr { position: absolute; top: -7px; width: 14px; height: 14px; margin-left: -7px; z-index: 3; border-radius: 50%; border: 1px solid var(--line-strong);
   background: var(--surface); color: var(--ink-2); font-size: 11px; line-height: 1; padding: 0; display: grid; place-items: center; opacity: 0; transition: opacity .1s; }
 .ve-lane:hover .ve-tr, .ve-tr.on { opacity: 1; }
 .ve-tr.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ve-tr { font-size: 9px; }
+.ve-lane { overflow: visible; }
+.ve-clip .eh { width: 8px; }
 .ve-small { font-size: 11px; margin: -2px 0 8px; display: block; text-align: left; }
 .ve-banner { padding: 8px 18px; background: color-mix(in srgb, var(--err) 14%, var(--surface)); border-bottom: 1px solid var(--err); font-size: 13px; }
 .ve-banner[hidden] { display: none; }
 .ve-upload-state.error { color: var(--err); }
 .ve-top { grid-row: 1; } .ve-banner { grid-row: 2; } .ve-main { grid-row: 3; } .ve-timeline { grid-row: 4; }
+.ve-clip .wave { position: absolute; inset: 2px 0; width: 100%; height: calc(100% - 4px); pointer-events: none; }
+.ve-clip .wave path { stroke: rgb(255 255 255 / .55); stroke-width: 0.6; vector-effect: non-scaling-stroke; fill: none; }
+.ve-clip .frozen { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgb(255 255 255 / .28) 0 4px, transparent 4px 8px); border-left: 1px dashed rgb(255 255 255 / .8); }
+.ve-clip .spd { position: absolute; right: 8px; top: 1px; font: 600 10px var(--mono); font-style: normal; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }

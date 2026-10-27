@@ -74,7 +74,7 @@ def test_sanitize_drops_bad_clips_and_clamps(tmp_path, assets):
     assert (p['width'], p['height'], p['background']) == (1080, 1920, '#000000')
     kinds = [c['kind'] for c in p['clips']]
     assert kinds == ['video', 'text']
-    assert p['clips'][0]['duration'] == pytest.approx(2.0, abs=0.1)
+    assert p['clips'][0]['duration'] == 99  # video may run past its source: the last frame holds
     assert p['clips'][1]['lane'] == 'T1' and p['clips'][1]['text']['color'] == '#ffffff'
 
 
@@ -216,3 +216,47 @@ def test_phone_photo_orientation_and_odd_formats(tmp_path):
     assert noext['kind'] == 'image'
     with pytest.raises(ValueError, match='HEIC'):
         lib.add(b'xx', 'IMG_2.HEIC')
+
+
+def test_speed_loop_and_freeze_export(tmp_path, assets):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    clip = lib.add((assets / 'clip.mp4').read_bytes(), 'clip.mp4')        # 3 s with sound
+    music = lib.add((assets / 'music.mp3').read_bytes(), 'music.mp3')     # 4 s
+    p = vid.sanitize_project({'fps': 12, 'clips': [
+        {'id': 'fast', 'kind': 'video', 'media': clip['id'], 'start': 0, 'duration': 1.5, 'speed': 2},
+        {'id': 'held', 'kind': 'video', 'media': clip['id'], 'start': 1.5, 'duration': 6, 'in': 1},   # 2 s of video, 4 s frozen
+        {'id': 'loop', 'kind': 'audio', 'media': music['id'], 'lane': 'A2', 'start': 0, 'duration': 7.5, 'loop': True},
+        {'id': 'cut', 'kind': 'audio', 'media': music['id'], 'lane': 'A3', 'start': 0, 'duration': 20},  # clamped to 4 s
+    ]}, lib)
+    assert p['clips'][1]['duration'] == 6 and p['clips'][2]['duration'] == 7.5
+    assert p['clips'][3]['duration'] == pytest.approx(4, abs=0.1)
+    p['width'], p['height'] = 160, 90
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(p, lambda m: (lib.path(m), bool(lib.get(m).get('has_audio'))), {}, quality='small')
+    for _ in range(600):
+        if jobs.get(job['id'])['status'] != 'running':
+            break
+        time.sleep(0.1)
+    done = jobs.get(job['id'])
+    assert done['status'] == 'done', done
+    out = jobs.export_path(done['file'])
+    dur = float(subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', str(out)],
+                               capture_output=True, text=True).stdout)
+    assert dur == pytest.approx(7.5, abs=0.25)
+    # Looped music is still sounding near the end.
+    level = subprocess.run(['ffmpeg', '-v', 'info', '-ss', '6.8', '-i', str(out), '-t', '0.5', '-af', 'volumedetect', '-f', 'null', '-'],
+                           capture_output=True, text=True).stderr
+    mean = float(level.split('mean_volume:')[1].split('dB')[0])
+    assert mean > -40
+
+
+def test_freeze_frame_and_peaks(tmp_path, assets):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    clip = lib.add((assets / 'clip.mp4').read_bytes(), 'clip.mp4')
+    still = lib.freeze_frame(clip['id'], 1.2)
+    assert still['kind'] == 'image' and (still['width'], still['height']) == (320, 240)
+    pk = lib.peaks(clip['id'])
+    assert pk['per_second'] == 40 and len(pk['peaks']) == pytest.approx(120, abs=4) and max(pk['peaks']) == 100
+    assert lib.peaks(still['id']) is None
+    with pytest.raises(ValueError):
+        lib.freeze_frame(still['id'], 0)

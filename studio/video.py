@@ -132,6 +132,39 @@ def probe(path):
     return info
 
 
+def compute_peaks(path, per_second=40):
+    """Loudness outline of any audio/video file for timeline waveforms (0-100 per step)."""
+    exe = tools()['ffmpeg']
+    if not exe:
+        return {'per_second': per_second, 'peaks': []}
+    proc = subprocess.run([exe, '-v', 'error', '-i', str(path), '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1'],
+                          capture_output=True, timeout=600)
+    import numpy as np
+    pcm = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    step = max(1, 8000 // per_second)
+    n = len(pcm) // step
+    if not n:
+        return {'per_second': per_second, 'peaks': []}
+    blocks = np.abs(pcm[: n * step]).reshape(n, step).max(axis=1)
+    top = float(blocks.max()) or 1.0
+    return {'per_second': per_second, 'peaks': [int(round(100 * (b / top) ** 0.7)) for b in blocks]}
+
+
+def cached_peaks(path, cache_path):
+    path, cache_path = Path(path), Path(cache_path)
+    try:
+        if cache_path.is_file() and cache_path.stat().st_mtime >= path.stat().st_mtime:
+            return json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        pass
+    data = compute_peaks(path)
+    try:
+        cache_path.write_text(json.dumps(data))
+    except OSError:
+        pass
+    return data
+
+
 # ---------------------------------------------------------------- media
 class MediaLibrary:
     def __init__(self, folder):
@@ -301,6 +334,26 @@ class MediaLibrary:
             meta['proxy'] = status
             self._meta_path(mid).write_text(json.dumps(meta, indent=2), encoding='utf-8')
 
+    def peaks(self, mid):
+        meta, path = self.get(mid), self.path(mid)
+        if not meta or not path or meta['kind'] == 'image':
+            return None
+        return cached_peaks(path, self.dir / f'{mid}.peaks.json')
+
+    def freeze_frame(self, mid, t):
+        """Save the video frame at `t` seconds as a new picture in the library."""
+        meta, path = self.get(mid), self.path(mid)
+        if not meta or meta['kind'] != 'video' or not path:
+            raise ValueError('Freeze frame works on video clips.')
+        t = max(0.0, min(float(t), max(0.0, (meta.get('duration') or 0) - 0.05)))
+        tmp = self.dir / f'.frame-{uuid.uuid4().hex}.png'
+        proc = subprocess.run([tools()['ffmpeg'] or 'ffmpeg', '-y', '-loglevel', 'error', '-ss', f'{t:.3f}', '-i', str(path),
+                               '-frames:v', '1', str(tmp)], capture_output=True, timeout=120)
+        if proc.returncode != 0 or not tmp.is_file():
+            tmp.unlink(missing_ok=True)
+            raise ValueError('Could not grab that frame.')
+        return self.add_path(tmp, f'{meta["name"][:60]} (frame {t:.1f}s).png')
+
     def rename(self, mid, name):
         meta = self.get(mid)
         if not meta:
@@ -377,6 +430,7 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
             'opacity': _num(c.get('opacity'), 0, 1, 1), 'fade_in': _num(c.get('fade_in'), 0, 10, 0),
             'fade_out': _num(c.get('fade_out'), 0, 10, 0), 'zoom': _num(c.get('zoom'), 0, 0.5, 0),
             'volume': _num(c.get('volume'), 0, 2, 1), 'muted': bool(c.get('muted')),
+            'speed': round(_num(c.get('speed'), 0.25, 2, 1), 3), 'loop': bool(c.get('loop')),
         }
         if kind != 'audio':
             clip['anim_in'] = sanitize_anim(c.get('anim_in'))
@@ -395,7 +449,8 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
                     continue
                 if meta.get('duration') and kind in ('video', 'audio'):
                     clip['in'] = min(clip['in'], max(0.0, meta['duration'] - 0.1))
-                    clip['duration'] = round(min(clip['duration'], meta['duration'] - clip['in']), 3)
+                    if kind == 'audio' and not clip['loop']:  # video may run past its end (last frame holds)
+                        clip['duration'] = round(min(clip['duration'], (meta['duration'] - clip['in']) / clip['speed']), 3)
             elif not (isinstance(mid, str) and ID_RE.fullmatch(mid)):
                 continue
             clip['media'] = mid
@@ -579,9 +634,13 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 if c['kind'] == 'image':
                     idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(path))
                 else:
-                    idx = add_input('-ss', f'{c["in"]:.3f}', '-t', f'{dur:.3f}', '-i', str(path))
-                    if ext > 0:  # hold the last frame if the source runs out during a transition
-                        chain.append(f'tpad=stop_mode=clone:stop_duration={ext:.3f}')
+                    sp = c.get('speed', 1.0)
+                    loop = ['-stream_loop', '-1'] if c.get('loop') else []
+                    idx = add_input('-ss', f'{c["in"]:.3f}', *loop, '-t', f'{dur * sp + 0.05:.3f}', '-i', str(path))
+                    if abs(sp - 1) > 1e-3:
+                        chain.append(f'setpts=(PTS-STARTPTS)/{sp:.4f}')
+                    # Past the end of the source (dragged longer, or held under a transition): freeze the last frame.
+                    chain.append(f'tpad=stop_mode=clone:stop_duration={dur:.3f},trim=duration={dur:.3f}')
                 if c['fit'] == 'contain':
                     chain.append(f'scale={bw}:{bh}:force_original_aspect_ratio=decrease,format=rgba,'
                                  f'pad={bw}:{bh}:(ow-iw)/2:(oh-ih)/2:color=black@0')
@@ -591,8 +650,6 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             chain.append(f'fps={fps},format=rgba')
             if c['kind'] == 'video' and has_audio and not c['muted'] and c['volume'] > 0:
                 audio_labels.append(_audio_chain(fc, f'{idx}:a', c, len(audio_labels)))
-            if ext > 0:
-                chain.append(f'trim=duration={dur:.3f}')
         if opacity < 0.999:
             chain.append(f'colorchannelmixer=aa={opacity:.3f}')
         if c['fade_in'] > 0:
@@ -628,7 +685,8 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
         if path is None or not has_audio:
             warnings.append(f'Missing audio for "{c.get("name") or "audio"}" was skipped.')
             continue
-        idx = add_input('-ss', f'{c["in"]:.3f}', '-t', f'{c["duration"]:.3f}', '-i', str(path))
+        loop = ['-stream_loop', '-1'] if c.get('loop') else []
+        idx = add_input('-ss', f'{c["in"]:.3f}', *loop, '-t', f'{c["duration"] * c.get("speed", 1.0) + 0.05:.3f}', '-i', str(path))
         audio_labels.append(_audio_chain(fc, f'{idx}:a', c, len(audio_labels)))
 
     if audio_labels:
@@ -651,7 +709,11 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
 
 def _audio_chain(fc, src, c, n):
     dur = c['duration']
-    parts = [f'atrim=0:{dur:.3f}', 'asetpts=PTS-STARTPTS', 'aresample=48000',
+    sp = c.get('speed', 1.0)
+    tempo = []
+    if abs(sp - 1) > 1e-3:  # atempo works in 0.5-2x steps
+        tempo = [f'atempo={sp:.4f}'] if sp >= 0.5 else ['atempo=0.5', f'atempo={sp / 0.5:.4f}']
+    parts = ['asetpts=PTS-STARTPTS', *tempo, f'atrim=0:{dur:.3f}', 'asetpts=PTS-STARTPTS', 'aresample=48000',
              'aformat=sample_fmts=fltp:channel_layouts=stereo', f'volume={c["volume"]:.3f}']
     if c['fade_in'] > 0:
         parts.append(f'afade=t=in:st=0:d={min(c["fade_in"], dur):.3f}')
