@@ -87,6 +87,14 @@ def test_f0_energy_and_pause_shaping(model):
         assert st[:5].mean() > 1 and st[-5:].mean() < -1
         run(model, Shape(energy=0.5))
         assert float((seen['n'] - base_n).max()) > 0.1
+        # Tilt follows each sentence: the ramp restarts after the full stop.
+        run(model, Shape(tilt=-3)); per = torch.log2(seen['f0'] / base_f0.clamp(min=1)) * 12
+        stop_frame = int(torch.cumsum(run(model, Shape()).pred_dur, 0)[PS.index('.') + 1]) * 2
+        assert float(per[0, stop_frame + 4]) > 0 > float(per[0, stop_frame - 4])
+        d0 = run(model, Shape()).pred_dur
+        d_stop = run(model, Shape(stop_ms=250)).pred_dur
+        i = PS.index('.') + 1
+        assert int(d_stop[i]) == int(d0[i]) + 10 and int(d_stop.sum()) == int(d0.sum()) + 10
         d1, d2 = run(model, Shape()).pred_dur, run(model, Shape(punct=2.0)).pred_dur
         punct = torch.tensor([c in ',.!?;:—…' for c in ' ' + PS + ' '])
         assert torch.all(d2[punct] >= d1[punct] * 2 - 1) and torch.equal(d1[~punct], d2[~punct])

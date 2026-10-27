@@ -316,3 +316,5 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
   .kbd-hint { display: none; }
   .page { padding: 20px 16px 40px; }
 }
+.check-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--ink-2); margin: 10px 0 2px; }
+.check-row input { accent-color: var(--ink); }

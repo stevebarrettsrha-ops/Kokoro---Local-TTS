@@ -17,7 +17,7 @@ def db_to_amp(db):
     return 10.0 ** (db / 20.0)
 
 
-def trim(y, sr=MODEL_RATE, threshold_db=-48.0, head_ms=18, tail_ms=70):
+def trim(y, sr=MODEL_RATE, threshold_db=-54.0, head_ms=25, tail_ms=130):
     """Cut the model's variable lead-in/out silence so gaps are exactly as directed.
 
     Returns (trimmed, samples_removed_from_start).
@@ -62,17 +62,17 @@ def polish(y, sr):
     y = np.asarray(y, dtype=np.float64)
     sos = signal.butter(2, 70, 'highpass', fs=sr, output='sos')
     y = signal.sosfilt(sos, y)
-    # RMS compressor, 2.2:1 above -22 dBFS, 8 ms attack / 120 ms release.
+    # Gentle RMS compressor, 1.8:1 above -24 dBFS, 15 ms attack / 200 ms release.
     level = np.sqrt(np.maximum(uniform_filter1d(y ** 2, int(sr * 0.012)), 1e-12))
     level_db = 20 * np.log10(level)
-    over = np.maximum(0.0, level_db - (-22.0))
-    gr_db = -over * (1 - 1 / 2.2)
-    att = np.exp(-1.0 / (sr * 0.008))
-    rel = np.exp(-1.0 / (sr * 0.120))
+    over = np.maximum(0.0, level_db - (-24.0))
+    gr_db = -over * (1 - 1 / 1.8)
+    att = np.exp(-1.0 / (sr * 0.015))
+    rel = np.exp(-1.0 / (sr * 0.200))
     smooth = _smooth_gain(gr_db, att, rel)
     y = y * (10 ** (smooth / 20))
     # A touch of high-shelf cut tames the occasional metallic edge of neural vocoders.
-    y = _shelf(y, sr, 7500, -1.5)
+    y = _shelf(y, sr, 7500, -1.0)
     return y.astype(np.float32)
 
 

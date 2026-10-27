@@ -93,6 +93,10 @@ creations/
 
 ffmpeg is required: `sudo apt install ffmpeg`.
 
+## Natural delivery
+
+Consecutive sentences with the same voice and emotion are read together in one pass, so Kokoro hears each sentence in context; isolated short sentences tend to end on an odd, clipped fall. The **Between sentences** pause is added to Kokoro's own full-stop pause inside the model, rather than spliced in as silence, and emotional rise or fall is applied per sentence. Captions are still timed per sentence. Turn off **Read sentences together** for the old sentence-by-sentence behaviour.
+
 ## Directing a script
 
 | Write | Effect |

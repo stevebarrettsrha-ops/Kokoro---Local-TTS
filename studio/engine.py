@@ -61,6 +61,11 @@ VOICES = {
 }
 VOICE_NAMES = {k: v[0] for k, v in VOICES.items()}
 
+# Kokoro's own pause after a full stop is roughly this long; the "Between
+# sentences" setting adds (or removes) time relative to it inside the model.
+NATURAL_STOP_MS = 200
+CLONE_RUN_CHARS = 280
+
 # Chatterbox "exaggeration" at full emotion strength (0.5 = its neutral read).
 CLONE_EXPR = {'neutral': 0.5, 'warm': 0.55, 'joyful': 0.8, 'excited': 1.1, 'curious': 0.65, 'confident': 0.65,
               'calm': 0.35, 'sad': 0.45, 'angry': 1.0, 'fearful': 0.8, 'dramatic': 0.9, 'soft': 0.3}
@@ -122,6 +127,7 @@ def read_settings(payload, cloned=()):
         'pronunciations': [r for r in rules[:500] if isinstance(r, dict)],
         'heteronyms': _flag(payload.get('heteronyms'), True),
         'variation': int(bounded(payload.get('variation', 0), 0, 9999, 0)),
+        'flow': _flag(payload.get('flow'), True),
     }
 
 
@@ -229,26 +235,34 @@ class Engine:
         return {'sentences': out, 'warnings': warnings}
 
     # ---- rendering -------------------------------------------------------
-    def _speak(self, item, cfg, speed_scale, index):
+    def _speak(self, run, cfg, speed_scale, index):
+        """Render a run of sentences that share voice, emotion and pace in one pass.
+
+        Reading sentences together lets Kokoro shape each sentence with its
+        neighbours in view, which sounds far more natural than isolated lines.
+        """
+        item = run[0]
         style = item['style'] or cfg['style']
         intensity = cfg['intensity'] if item['intensity'] is None else item['intensity']
         moves = blend_style(style, intensity)
         voice = item['voice'] or cfg['voice']
         if voice.startswith(CLONE_PREFIX):
-            return self._speak_cloned(item, cfg, speed_scale, style, intensity, moves, voice)
+            return self._speak_cloned(run, cfg, speed_scale, style, intensity, moves, voice)
         pipe = self.pipeline(voice[0])
         if voice == cfg['voice']:
             ref = self.voice_ref(pipe, voice, cfg['blend_voice'], cfg['blend'], cfg['blend_mode'])
         else:
             ref = voice
         speed = bounded(cfg['speed'] * item['speed'] * moves['speed'] * speed_scale, 0.5, 2.0, 1.0)
+        stop_ms = max(-NATURAL_STOP_MS + 50, cfg['sentence_gap'] + moves['gap'] - NATURAL_STOP_MS)
         shape = Shape(pitch=cfg['pitch'] + moves['pitch'], range=cfg['range'] * moves['range'],
                       tilt=moves['tilt'], tremor=moves['tremor'],
                       energy=max(-1.0, min(1.0, cfg['energy'] + moves['energy'])),
-                      punct=cfg['punct'] * moves['punct'], seed=index * 97)
+                      punct=cfg['punct'] * moves['punct'], stop_ms=stop_ms, seed=index * 97)
+        text = ' '.join(i['speak'] for i in run)
         pieces, words, t = [], [], 0.0
         with shaping(shape):
-            for result in pipe(item['speak'], voice=ref, speed=speed, split_pattern=None):
+            for result in pipe(text, voice=ref, speed=speed, split_pattern=None):
                 wave = getattr(result, 'audio', None) if not isinstance(result, tuple) else result[2]
                 if wave is None:
                     continue
@@ -261,7 +275,8 @@ class Engine:
                 if not self.patched and abs(shape.pitch) > 0.04:
                     wave = _fallback_pitch(wave, shape.pitch)
                 if pieces:
-                    gap = np.zeros(int(SR * 0.12), dtype=np.float32)
+                    # Long passages come back in several chunks, split at sentence ends.
+                    gap = np.zeros(int(SR * max(0.08, (cfg['sentence_gap'] + moves['gap']) / 1000)), dtype=np.float32)
                     pieces.append(gap)
                     t += len(gap) / SR
                 tokens = None if isinstance(result, tuple) else getattr(result, 'tokens', None)
@@ -272,10 +287,11 @@ class Engine:
             raise RuntimeError(f'Kokoro produced no audio for: "{item["text"][:60]}"')
         y = np.concatenate(pieces) * fx.db_to_amp(moves['gain'])
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': words, 'style': style,
-                'voice': voice, 'gap': moves['gap'], 'text': item['text']}
+                'voice': voice, 'gap': moves['gap'], 'text': run[-1]['text'],
+                'sentences': [i['text'] for i in run]}
 
-    def _speak_cloned(self, item, cfg, speed_scale, style, intensity, moves, voice):
-        """Render one sentence with a cloned voice through Chatterbox.
+    def _speak_cloned(self, run, cfg, speed_scale, style, intensity, moves, voice):
+        """Render sentences with a cloned voice through Chatterbox, a few at a time.
 
         Emotion maps to Chatterbox's exaggeration; pace maps to its CFG weight
         (lower = slower, more deliberate). Both are approximate.
@@ -287,22 +303,55 @@ class Engine:
         exag = 0.5 + (CLONE_EXPR.get(style, 0.5) - 0.5) * k
         exag += 0.3 * (cfg['range'] - 1) + 0.15 * cfg['energy']
         exag = bounded(exag, 0.25, 1.6, 0.5)
-        pace = cfg['speed'] * item['speed'] * moves['speed'] * speed_scale
+        pace = cfg['speed'] * run[0]['speed'] * moves['speed'] * speed_scale
         cfg_weight = bounded(0.5 - max(0.0, exag - 0.6) * 0.35 + (pace - 1) * 0.6, 0.15, 0.85, 0.5)
-        seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
-        y = self.cloner.speak(item['plain'], ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
-        y, _cut = fx.trim(np.asarray(y, dtype=np.float32))
-        if not y.size:
-            raise RuntimeError(f'The cloned voice produced no audio for: "{item["text"][:60]}"')
+        # Chatterbox also reads better with context, but long inputs drift, so send a few sentences at a time.
+        groups, cur = [], []
+        for i in run:
+            if cur and sum(len(x['plain']) for x in cur) + len(i['plain']) > CLONE_RUN_CHARS:
+                groups.append(cur)
+                cur = []
+            cur.append(i)
+        if cur:
+            groups.append(cur)
+        pieces = []
+        for g in groups:
+            text = ' '.join(i['plain'] for i in g)
+            seed = (zlib.crc32(text.encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
+            y = self.cloner.speak(text, ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
+            y, _cut = fx.trim(np.asarray(y, dtype=np.float32))
+            if not y.size:
+                raise RuntimeError(f'The cloned voice produced no audio for: "{g[0]["text"][:60]}"')
+            if pieces:
+                pieces.append(np.zeros(int(SR * max(0.08, (cfg['sentence_gap'] + moves['gap']) / 1000)), dtype=np.float32))
+            pieces.append(y)
+        y = np.concatenate(pieces)
         if abs(cfg['pitch']) > 0.04:
             y = _fallback_pitch(y, cfg['pitch'])
         y = y * fx.db_to_amp(moves['gain'])
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': [], 'style': style,
-                'voice': voice, 'gap': moves['gap'], 'text': item['text']}
+                'voice': voice, 'gap': moves['gap'], 'text': run[-1]['text'], 'sentences': [i['text'] for i in run]}
+
+    @staticmethod
+    def _runs(items, flow=True):
+        """Group consecutive sentences with the same voice, emotion and pace."""
+        out = []
+        for item in items:
+            if item['kind'] != 'speech':
+                out.append(item)
+                continue
+            key = (item['style'], item['intensity'], item['voice'], item['speed'])
+            prev = out[-1] if out else None
+            if (flow and prev and prev['kind'] == 'run' and prev['key'] == key
+                    and prev['items'][-1]['text'].rstrip()[-1:] in '.!?…"”)'):
+                prev['items'].append(item)
+            else:
+                out.append({'kind': 'run', 'key': key, 'items': [item]})
+        return out
 
     def _render_pass(self, items, cfg, speed_scale):
         timeline, last = [], None
-        for i, item in enumerate(items):
+        for i, item in enumerate(self._runs(items, cfg['flow'])):
             if item['kind'] == 'pause':
                 if item.get('para'):
                     extra = last['gap'] if last else 0
@@ -313,7 +362,7 @@ class Engine:
                 continue
             if last is not None and timeline and timeline[-1]['kind'] == 'speech':
                 timeline.append({'kind': 'gap', 'ms': _gap_after(last, cfg), 'flex': True})
-            seg = self._speak(item, cfg, speed_scale, i)
+            seg = self._speak(item['items'], cfg, speed_scale, i)
             seg['kind'] = 'speech'
             timeline.append(seg)
             last = seg
@@ -359,13 +408,14 @@ class Engine:
                 continue
             a = part['audio']
             dur = len(a) / SR
-            words = cc.align(part['text'], [dict(w, start=w['start'], end=w['end']) for w in part['words']], 0.0, dur)
-            for w in words:
-                w['start'] = round(t + max(0.0, min(dur, w['start'])), 3)
-                w['end'] = round(t + max(0.0, min(dur, w['end'])), 3)
-            sentences.append({'words': words})
-            segments.append({'start': round(t, 3), 'end': round(t + dur, 3), 'style': part['style'],
-                             'voice': part['voice'], 'text': part['text'][:200]})
+            for text, words in _split_words(part.get('sentences') or [part['text']], part['words'], dur):
+                for w in words:
+                    w['start'] = round(t + max(0.0, min(dur, w['start'])), 3)
+                    w['end'] = round(t + max(0.0, min(dur, w['end'])), 3)
+                sentences.append({'words': words})
+                if words:
+                    segments.append({'start': words[0]['start'], 'end': words[-1]['end'], 'style': part['style'],
+                                     'voice': part['voice'], 'text': text[:200]})
             chunks.append(a)
             t += dur
         data = np.concatenate(chunks)
@@ -406,6 +456,29 @@ class Engine:
         }
         (self.out / f'{rid}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
         return meta
+
+
+def _split_words(texts, timed, dur):
+    """Share a run's word timings out to its sentences (for captions)."""
+    counts = [len(t.split()) for t in texts]
+    if timed and len(timed) == sum(counts):
+        out, k = [], 0
+        for text, n in zip(texts, counts):
+            chunk = timed[k:k + n]
+            k += n
+            out.append((text, cc.align(text, chunk, chunk[0]['start'] or 0.0, chunk[-1]['end'] or dur)))
+        return out
+    # Counts differ (numbers read out, pronunciation swaps...): split the span by text length.
+    total = float(sum(len(t) + 1 for t in texts)) or 1.0
+    starts = [w['start'] for w in timed if w.get('start') is not None]
+    ends = [w['end'] for w in timed if w.get('end') is not None]
+    lo, hi = (min(starts), max(ends)) if starts and ends else (0.0, dur)
+    out, pos = [], lo
+    for text in texts:
+        span = (hi - lo) * (len(text) + 1) / total
+        out.append((text, cc.align(text, [], pos, pos + span)))
+        pos += span
+    return out
 
 
 def _gap_after(seg, cfg):

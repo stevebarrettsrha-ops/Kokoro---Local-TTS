@@ -30,7 +30,7 @@ The boats go out in the dark. [beat] By sunrise, they're already halfway to the 
 const DEFAULTS = {
   voice: 'af_heart', blend_voice: '', blend: 0.3, blend_mode: 'full', style: 'neutral', intensity: 60,
   speed: 1, pitch: 0, range: 1, energy: 0, punct: 1.1, sentence_gap: 300, paragraph_gap: 700,
-  preset: 'youtube', lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false,
+  preset: 'youtube', flow: true, lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false,
 };
 
 const state = {
@@ -188,7 +188,7 @@ Object.entries(FORMATS).forEach(([id, f]) => {
   el.addEventListener('dblclick', () => { el.value = DEFAULTS[id]; el.dispatchEvent(new Event('input')); });
   upd();
 });
-['voice', 'blendVoice', 'lufs', 'rate', 'peak', 'polish', 'room_tone', 'mp3'].forEach(id => $('#' + id).addEventListener('change', changed));
+['voice', 'blendVoice', 'lufs', 'rate', 'peak', 'polish', 'room_tone', 'mp3', 'flow'].forEach(id => $('#' + id).addEventListener('change', changed));
 $('#blendVoice').addEventListener('change', () => { $('#blendRow').hidden = !$('#blendVoice').value; });
 $$('[data-blend-mode]').forEach(b => b.onclick = () => setBlendMode(b.dataset.blendMode));
 function setBlendMode(m) { state.blendMode = m === 'delivery' ? 'delivery' : 'full'; $$('[data-blend-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.blendMode === state.blendMode))); changed(); }
@@ -209,7 +209,7 @@ function readSettings() {
     speed: +$('#speed').value, pitch: +$('#pitch').value, range: +$('#range').value, energy: +$('#energy').value,
     punct: +$('#punct').value, sentence_gap: +$('#sentence_gap').value, paragraph_gap: +$('#paragraph_gap').value,
     preset: $('#preset').value, lufs: $('#lufs').value, rate: $('#rate').value, peak: $('#peak').value,
-    target: $('#target').value, polish: $('#polish').checked, room_tone: $('#room_tone').checked, mp3: $('#mp3').checked,
+    target: $('#target').value, flow: $('#flow').checked, polish: $('#polish').checked, room_tone: $('#room_tone').checked, mp3: $('#mp3').checked,
   };
 }
 function setSelect(el, v) { if (v !== undefined && [...el.options].some(o => o.value === String(v))) el.value = String(v); }
@@ -224,7 +224,7 @@ function applySettings(s) {
   });
   ['preset', 'lufs', 'rate', 'peak'].forEach(k => setSelect($('#' + k), s[k]));
   $('#target').value = s.target || '';
-  ['polish', 'room_tone', 'mp3'].forEach(k => { $('#' + k).checked = !!s[k]; });
+  ['polish', 'room_tone', 'mp3', 'flow'].forEach(k => { $('#' + k).checked = !!s[k]; });
   setBlendMode(s.blend_mode);
   state.intensity = clamp(Number(s.intensity) || 0, 0, 120);
   selectStyle(s.style);

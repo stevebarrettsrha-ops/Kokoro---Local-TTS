@@ -106,7 +106,7 @@ def test_trim_reports_offset():
     y = np.zeros(24000, dtype=np.float32)
     y[6000:12000] = 0.3
     out, cut = fx.trim(y)
-    assert 5000 < cut < 6000 and len(out) < 9000
+    assert 5000 < cut < 6000 and len(out) < 10500  # keeps soft word endings (130 ms tail)
 
 
 # ---------- captions ----------
@@ -167,7 +167,9 @@ def test_synthesize_writes_take_with_captions(engine, tmp_path):
 def test_explicit_pause_is_exact(engine):
     meta = engine.synthesize({'text': 'First sentence is here. [pause=1000] Second sentence is here.', 'lufs': 'off', 'polish': False, 'rate': 24000})
     a, b = meta['segments']
-    assert b['start'] - a['end'] == pytest.approx(1.0, abs=0.01)
+    # Segments span the spoken words; the silence between the two clips is exactly 1 s,
+    # plus each clip's own soft lead-out/lead-in.
+    assert 1.0 <= b['start'] - a['end'] <= 1.0 + 0.35
 
 
 def test_fit_to_duration(engine):
@@ -356,3 +358,21 @@ def test_clone_routes(cloning_engine, monkeypatch):
     assert {v['id'] for v in cat['cloned']} == {'clone:marcus', 'clone:grace'} and cat['cloning']['installed']
     assert c.get('/api/voices/clone/grace/sample').mimetype == 'audio/wav'
     assert c.delete('/api/voices/clone/grace').status_code == 200
+
+
+def test_sentences_read_together_but_captioned_separately(engine):
+    text = 'This is the first sentence here. And here is the second one. [sad] Now a sad line follows.'
+    meta = engine.synthesize({'text': text, 'rate': 24000, 'sentence_gap': 450})
+    calls = engine.pipelines['a'].calls
+    assert calls[0]['text'] == 'This is the first sentence here. And here is the second one.'
+    assert calls[0]['shape'].stop_ms == pytest.approx(450 - 200)
+    assert calls[1]['text'] == 'Now a sad line follows.' and calls[1]['shape'].tilt < 0
+    assert [s['text'] for s in meta['segments']] == ['This is the first sentence here.', 'And here is the second one.',
+                                                     'Now a sad line follows.']
+    srt = (engine.out / f"{meta['id']}.srt").read_text()
+    assert 'This is the first sentence here.' in srt and 'And here is the second one.' in srt
+
+
+def test_flow_off_reads_sentence_by_sentence(engine):
+    engine.synthesize({'text': 'One sentence goes here. Another sentence goes here.', 'flow': False, 'rate': 24000})
+    assert [c['text'] for c in engine.pipelines['a'].calls] == ['One sentence goes here.', 'Another sentence goes here.']

@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 
 F0_FRAME_RATE = 80.0  # Kokoro: 600 samples per duration frame, F0 is upsampled x2.
 PUNCTUATION = ',.!?;:—…'
+STOPS = '.!?…'
+FRAME_MS = 25.0  # one duration frame = 600 samples at 24 kHz
 
 _local = threading.local()
 
@@ -34,11 +36,13 @@ class Shape:
     tremor: float = 0.0    # semitones of 5.5 Hz wobble
     energy: float = 0.0    # -1..1
     punct: float = 1.0     # x pause length at punctuation
+    stop_ms: float = 0.0   # extra pause after . ! ? inside the model (between sentences)
     seed: int = field(default=0)
 
     def is_neutral(self):
         return (abs(self.pitch) < 1e-3 and abs(self.range - 1) < 1e-3 and abs(self.tilt) < 1e-3
-                and abs(self.tremor) < 1e-3 and abs(self.energy) < 1e-3 and abs(self.punct - 1) < 1e-3)
+                and abs(self.tremor) < 1e-3 and abs(self.energy) < 1e-3 and abs(self.punct - 1) < 1e-3
+                and abs(self.stop_ms) < 1e-3)
 
 
 def active_shape():
@@ -55,8 +59,24 @@ def shaping(shape):
         _local.shape = previous
 
 
-def shape_f0(f0, shape):
-    """Return a reshaped copy of an F0 tensor shaped [batch, frames] (Hz)."""
+def _phrase_ramp(n, bounds, idx):
+    """-0.5 -> +0.5 across each phrase (bounds = F0 frame indices where phrases end)."""
+    import torch
+
+    ramp = torch.zeros_like(idx)
+    edges = [0] + [b for b in sorted(set(bounds or [])) if 0 < b < n] + [n]
+    for a, b in zip(edges[:-1], edges[1:]):
+        if b - a > 1:
+            ramp[a:b] = torch.linspace(-0.5, 0.5, b - a, dtype=idx.dtype, device=idx.device)
+    return ramp
+
+
+def shape_f0(f0, shape, bounds=None):
+    """Return a reshaped copy of an F0 tensor shaped [batch, frames] (Hz).
+
+    `bounds` are frame indices where sentences end, so rise/fall (tilt) is
+    applied per sentence rather than across a whole paragraph.
+    """
     import torch
 
     if shape is None or (abs(shape.pitch) < 1e-3 and abs(shape.range - 1) < 1e-3
@@ -73,7 +93,7 @@ def shape_f0(f0, shape):
     dev = (log_f0 - mean).clamp(-1.0, 1.0)  # at most one octave from the mean
     n = f0.shape[-1]
     idx = torch.arange(n, device=f0.device, dtype=f0.dtype)
-    ramp = (idx / max(1, n - 1)) - 0.5
+    ramp = _phrase_ramp(n, bounds, idx)
     target = mean + dev * shape.range + (shape.pitch + shape.tilt * ramp) / 12.0
     if shape.tremor:
         phase = (shape.seed % 628) / 100.0
@@ -108,9 +128,15 @@ def _forward_with_tokens(self, input_ids, ref_s, speed=1):
     x, _ = self.predictor.lstm(d)
     duration = self.predictor.duration_proj(x)
     duration = torch.sigmoid(duration).sum(axis=-1) / speed
+    stops = None
+    if self._studio_stop_ids is not None:
+        stops = torch.isin(input_ids, self._studio_stop_ids.to(input_ids.device))
+        stops[..., -2:] = False  # the chunk's own final stop: trailing silence is trimmed anyway
     if shape is not None and abs(shape.punct - 1) > 1e-3 and self._studio_punct_ids is not None:
         mask = torch.isin(input_ids, self._studio_punct_ids.to(input_ids.device))
         duration = torch.where(mask, duration * shape.punct, duration)
+    if shape is not None and abs(shape.stop_ms) > 1e-3 and stops is not None:
+        duration = torch.where(stops, (duration + shape.stop_ms / FRAME_MS).clamp(min=1), duration)
     pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
     indices = torch.repeat_interleave(torch.arange(input_ids.shape[1], device=self.device), pred_dur)
     pred_aln_trg = torch.zeros((input_ids.shape[1], indices.shape[0]), device=self.device)
@@ -119,8 +145,12 @@ def _forward_with_tokens(self, input_ids, ref_s, speed=1):
     en = d.transpose(-1, -2) @ pred_aln_trg
     F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
     if shape is not None:
+        bounds = None
+        if stops is not None and bool(stops.any()):
+            ends = torch.cumsum(pred_dur.reshape(-1), 0) * 2  # F0 runs at twice the duration frame rate
+            bounds = [int(ends[i]) for i in torch.nonzero(stops.reshape(-1)).reshape(-1).tolist()]
         N_pred = shape_energy(N_pred, F0_pred, shape)
-        F0_pred = shape_f0(F0_pred, shape)
+        F0_pred = shape_f0(F0_pred, shape, bounds)
     t_en = self.text_encoder(input_ids, input_lengths, text_mask)
     asr = t_en @ pred_aln_trg
     audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128]).squeeze()
@@ -136,6 +166,8 @@ def patch_model(model):
         return False
     ids = sorted({model.vocab[p] for p in PUNCTUATION if p in getattr(model, 'vocab', {})})
     model._studio_punct_ids = torch.tensor(ids, dtype=torch.long) if ids else None
+    stop_ids = sorted({model.vocab[p] for p in STOPS if p in getattr(model, 'vocab', {})})
+    model._studio_stop_ids = torch.tensor(stop_ids, dtype=torch.long) if stop_ids else None
     model.forward_with_tokens = types.MethodType(torch.no_grad()(_forward_with_tokens), model)
     model._studio_patched = True
     return True
