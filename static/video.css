@@ -178,3 +178,11 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 .ve-filter canvas { width: 100%; height: auto; border-radius: 2px; display: block; }
 .ve-filter[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); color: var(--ink); }
 .ve-btnrow .btn[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.ve-menu { position: fixed; z-index: 50; min-width: 200px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px; box-shadow: 0 8px 24px rgb(0 0 0 / .18); display: grid; }
+.ve-menu[hidden] { display: none; }
+.ve-menu button { border: 0; background: none; text-align: left; padding: 6px 10px; font-size: 13px; border-radius: 3px; }
+.ve-menu button:hover { background: var(--bg); }
+.ve-menu button.danger { color: var(--err); }
+.ve-align { display: flex; gap: 4px; margin: 2px 0 6px; }
+.ve-align .icon-btn { width: 30px; height: 26px; font-size: 13px; }
+#veExportDialog .row.two { grid-template-columns: repeat(3, 1fr); }

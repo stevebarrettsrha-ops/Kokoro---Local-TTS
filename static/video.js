@@ -267,24 +267,53 @@ async function addTake(rec, {captions = false, at = null} = {}) {
   if (captions) await addCaptions(clip);
   return clip;
 }
-async function addCaptions(clip) {
+const CAPTION_STYLES = {classic: 'Classic (a line at a time)', highlight: 'Highlight the spoken word', single: 'One word at a time'};
+let captionStyle = store.get('ve-capstyle', 'highlight');
+async function addCaptions(clip, style = captionStyle) {
   const rid = clip.media.slice(5);
   let cues;
   try { cues = (await api(`/api/recordings/${rid}/cues`)).cues; } catch (err) { K.toast('No captions for this take: ' + err.message); return; }
   if (!cues.length) { K.toast('This take has no captions.'); return; }
-  const preset = TEXT_PRESETS.find(p => p.name === 'Caption');
-  commit(p => {
-    for (const cue of cues) {
-      const start = clip.start + cue.start - clip.in;
-      const end = Math.min(clip.start + clip.duration, clip.start + cue.end - clip.in);
-      if (end <= clip.start || end - start < 0.15) continue;
-      const [x, y, w, h] = preset.box;
-      p.clips.push({id: uid(), kind: 'text', lane: 'T1', start: Math.max(clip.start, start), duration: end - Math.max(clip.start, start),
-        x, y, w, h, fit: 'cover', opacity: 1, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false, in: 0, name: 'Caption',
-        text: textDefaults({...preset.text, content: cue.text.replace(/\n/g, ' ')})});
+  const sp = clip.speed || 1;
+  const at = s => clip.start + (s - clip.in) / sp;              // take time -> timeline time
+  const inside = (a, b) => b > clip.start + 0.02 && a < clip.start + clip.duration - 0.02;
+  const base = {fit: 'cover', opacity: 1, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false, in: 0, speed: 1, loop: false};
+  const made = [];
+  for (const cue of cues) {
+    const words = cue.words?.length ? cue.words : [{w: cue.text.replace(/\n/g, ' '), s: cue.start, e: cue.end}];
+    if (style === 'classic') {
+      const a = at(cue.start), b = at(cue.end);
+      if (!inside(a, b)) continue;
+      made.push({...base, kind: 'text', lane: 'T1', start: a, duration: b - a, x: 0.08, y: 0.8, w: 0.84, h: 0.14, name: 'Caption',
+        text: textDefaults({content: cue.text.replace(/\n/g, ' '), size: 0.05, weight: 700, effect: 'background', fx_color: '#000000a6'})});
+    } else if (style === 'highlight') {
+      words.forEach((w, j) => {
+        const a = at(w.s), b = at(j + 1 < words.length ? words[j + 1].s : Math.max(w.e, cue.end));
+        if (!inside(a, b) || b - a < 0.04) return;
+        made.push({...base, kind: 'text', lane: 'T1', start: a, duration: b - a, x: 0.06, y: 0.66, w: 0.88, h: 0.24, name: 'Caption',
+          text: textDefaults({content: cue.text.replace(/\n/g, ' '), size: 0.065, weight: 900, font: 'sans', upper: true, effect: 'outline',
+            color: '#ffffff', hl_word: j, hl_color: '#ffd400'})});
+      });
+    } else {
+      words.forEach((w, j) => {
+        const a = at(w.s), b = at(j + 1 < words.length ? words[j + 1].s : Math.max(w.e, cue.end));
+        if (!inside(a, b) || b - a < 0.04) return;
+        made.push({...base, kind: 'text', lane: 'T1', start: a, duration: b - a, x: 0.08, y: 0.4, w: 0.84, h: 0.2, name: 'Caption',
+          anim_in: {type: 'pop', dur: Math.min(0.15, (b - a) / 2)},
+          text: textDefaults({content: w.w.replace(/[.,;:!?…]+$/, ''), size: 0.14, weight: 900, font: 'display', upper: true,
+            effect: 'outline', color: '#ffffff'})});
+      });
     }
+  }
+  // Clip each caption to the take and avoid overlaps between neighbours.
+  made.forEach((m, i) => {
+    m.id = uid();
+    const s0 = Math.max(clip.start, m.start), e0 = Math.min(clip.start + clip.duration, m.start + m.duration,
+      i + 1 < made.length ? Math.max(made[i + 1].start, s0 + 0.04) : Infinity);
+    m.start = Math.round(s0 * 1000) / 1000; m.duration = Math.max(0.04, Math.round((e0 - s0) * 1000) / 1000);
   });
-  K.toast(`Added ${cues.length} caption${cues.length === 1 ? '' : 's'} on the Text track.`);
+  commit(p => { p.clips.push(...made); });
+  K.toast(`Added ${made.length} caption clip${made.length === 1 ? '' : 's'} on the Text track (${CAPTION_STYLES[style].toLowerCase()}).`);
 }
 function textDefaults(t) {
   return {content: 'Text', font: 'sans', size: 0.07, weight: 700, color: '#ffffff', bg: '', align: 'center',
@@ -310,7 +339,7 @@ function renderBin() {
   $$('#veMedia .ve-item').forEach(el => el.addEventListener('dragstart', e => e.dataTransfer.setData('text/x-ve', JSON.stringify({media: el.dataset.media}))));
 
   const takes = Object.values(st.takes).sort((a, b) => (b.created || '').localeCompare(a.created || ''));
-  $('#veTakes').innerHTML = takes.length ? takes.map(r => `
+  $('#veTakes').innerHTML = (takes.length ? `<label class="mini">Caption style<select class="input" id="veCapStyle">${Object.entries(CAPTION_STYLES).map(([k, v]) => `<option value="${k}" ${captionStyle === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>` : '') + (takes.length ? takes.map(r => `
     <div class="ve-take" draggable="true" data-take="${r.id}">
       <div class="ve-take-bar">${(r.segments || []).map(s => `<i style="flex-grow:${(s.end - s.start).toFixed(2)};background:${K.COLORS[s.style] || '#888'}"></i>`).join('')}</div>
       <div class="ve-take-name">${esc(r.name || 'Voice take')}</div>
@@ -320,7 +349,8 @@ function renderBin() {
         <button class="link-btn" data-addtake="${r.id}">Add</button>
         <button class="link-btn" data-addcap="${r.id}" ${r.captions ? '' : 'disabled'}>Add with captions</button>
       </div>
-    </div>`).join('') : '<p class="muted ve-empty">No voice takes yet. Render one in the Script tab.</p>';
+    </div>`).join('') : '<p class="muted ve-empty">No voice takes yet. Render one in the Script tab.</p>');
+  $('#veCapStyle')?.addEventListener('change', e => { captionStyle = e.target.value; store.set('ve-capstyle', captionStyle); });
   $$('#veTakes [data-addtake]').forEach(b => b.onclick = () => addTake(st.takes[b.dataset.addtake]));
   $$('#veTakes [data-addcap]').forEach(b => b.onclick = () => addTake(st.takes[b.dataset.addcap], {captions: true}));
   let hear = null;
@@ -620,6 +650,22 @@ function drawText(ctx, c, W, H, chars = null) {
     default:
       fill(col);
   }
+  if (Number.isInteger(t.hl_word) && t.hl_word >= 0) {
+    // Dynamic captions: repaint the spoken word in the highlight colour, exactly over itself.
+    noShadow(); ctx.globalAlpha = base;
+    let k = 0;
+    lines.forEach((ln, i) => {
+      const words = ln.split(' '), lw = ctx.measureText(ln).width, x0 = xFor(lw), yy = y + i * lh;
+      words.forEach((w, j) => {
+        if (k === t.hl_word && w) {
+          const pre = words.slice(0, j).join(' ') + (j ? ' ' : '');
+          ctx.fillStyle = hexToRgba(t.hl_color || '#ffd400');
+          ctx.fillText(w, x0 + ctx.measureText(pre).width, yy);
+        }
+        if (w) k++;
+      });
+    });
+  }
   ctx.restore();
 }
 function drawMedia(ctx, src, c, W, H, t) {
@@ -749,7 +795,7 @@ function renderTimeline() {
     select_(c.id);
     $('#veProps [data-trtype]')?.focus();
   }));
-  $$('#veLanes .ve-clip').forEach(el => el.addEventListener('pointerdown', clipPointerDown));
+  $$('#veLanes .ve-clip').forEach(el => { el.addEventListener('pointerdown', clipPointerDown); el.addEventListener('contextmenu', clipMenu); });
   $$('#veLanes .ve-lane').forEach(el => {
     el.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('text/x-ve')) { e.preventDefault(); el.classList.add('over'); } });
     el.addEventListener('dragleave', () => el.classList.remove('over'));
@@ -848,6 +894,25 @@ $('#veRuler').addEventListener('pointerdown', e => {
   window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
 });
 
+/* Right-click menu on timeline clips. */
+function clipMenu(e) {
+  e.preventDefault();
+  const c = clipById(e.currentTarget.dataset.clip); if (!c) return;
+  select_(c.id);
+  const items = [['Split at playhead', split], ['Trim start to playhead', () => trimToPlayhead('start')], ['Trim end to playhead', () => trimToPlayhead('end')],
+    ['Duplicate', duplicate], ['Copy', copy], ...(st.clipboard ? [['Paste at playhead', paste]] : []),
+    ...(c.kind === 'video' ? [['Freeze frame at playhead', freezeFrame]] : []),
+    ...(c.kind === 'video' || c.kind === 'audio' ? [[c.muted ? 'Unmute' : 'Mute', () => commit(() => { c.muted = !c.muted; })]] : []),
+    ...(c.media?.startsWith('take:') ? [['Add captions', () => addCaptions(c)]] : []),
+    ['Delete', remove]];
+  const m = $('#veMenu');
+  m.innerHTML = items.map(([label], i) => `<button type="button" data-mi="${i}" class="${label === 'Delete' ? 'danger' : ''}">${label}</button>`).join('');
+  m.hidden = false;
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.min(e.clientX, innerWidth - r.width - 8) + 'px'; m.style.top = Math.min(e.clientY, innerHeight - r.height - 8) + 'px';
+  m.querySelectorAll('[data-mi]').forEach(b => b.onclick = () => { m.hidden = true; items[+b.dataset.mi][1](); });
+}
+document.addEventListener('pointerdown', e => { if (!e.target.closest('#veMenu')) $('#veMenu').hidden = true; });
 function clipPointerDown(e) {
   if (e.button !== 0) return;
   e.stopPropagation();
@@ -1020,6 +1085,8 @@ function renderProps() {
   }
   if (visual) {
     html += `<h3>Position</h3><div class="row four">${['x', 'y', 'w', 'h'].map(k => field({x: 'Left', y: 'Top', w: 'Width', h: 'Height'}[k] + ' %', `<input class="input mono" type="number" step="1" data-pos="${k}">`)).join('')}</div>
+      <div class="ve-align">${[['l', '⇤', 'Align left'], ['c', '↔', 'Centre horizontally'], ['r', '⇥', 'Align right'], ['t', '⤒', 'Align top'], ['m', '↕', 'Centre vertically'], ['b', '⤓', 'Align bottom']]
+        .map(([k, i, label]) => `<button type="button" class="icon-btn" data-align2="${k}" title="${label}" aria-label="${label}">${i}</button>`).join('')}</div>
       <div class="row ve-btnrow"><button type="button" class="btn ghost" data-act="fill">Fill frame</button><button type="button" class="btn ghost" data-act="center">Center</button>
       ${c.kind === 'video' || c.kind === 'image' ? `<span class="seg-toggle"><button type="button" data-fit="cover" aria-pressed="${c.fit === 'cover'}" title="Fill the box, cropping edges">Crop</button><button type="button" data-fit="contain" aria-pressed="${c.fit === 'contain'}" title="Show the whole picture">Fit</button></span>` : ''}</div>
       <div class="slider"><label>Opacity</label><output>${Math.round(c.opacity * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${c.opacity}" data-k="opacity"></div>`;
@@ -1070,7 +1137,8 @@ function renderProps() {
       <div class="checks small"><label><input type="checkbox" data-loop ${c.loop ? 'checked' : ''}> Loop to fill the clip</label></div>`;
     if (c.kind === 'video') html += `<button type="button" class="btn ghost wide" data-act="freeze">Freeze frame at playhead (2 s)</button>`;
   }
-  if (c.media?.startsWith('take:')) html += `<button type="button" class="btn ghost wide" data-act="captions">Add captions as text</button>`;
+  if (c.media?.startsWith('take:')) html += `<h3>Captions</h3>${field('Style', `<select class="input" data-capstyle>${Object.entries(CAPTION_STYLES).map(([k, v]) => `<option value="${k}" ${captionStyle === k ? 'selected' : ''}>${v}</option>`).join('')}</select>`)}
+    <button type="button" class="btn ghost wide" data-act="captions">Add captions as text</button>`;
   html += `<div class="row ve-btnrow end"><button type="button" class="btn ghost" data-act="trimstart" title="Q">Trim start to playhead</button><button type="button" class="btn ghost" data-act="trimend" title="W">Trim end to playhead</button></div>
     <div class="row ve-btnrow"><button type="button" class="btn ghost" data-act="split">Split</button><button type="button" class="btn ghost" data-act="dup">Duplicate</button><button type="button" class="btn ghost danger" data-act="del">Delete</button></div>`;
   box.innerHTML = html;
@@ -1143,6 +1211,12 @@ function bindProps(c) {
   box.querySelectorAll('[data-fit]').forEach(el => el.onclick = () => commit(() => { c.fit = el.dataset.fit; }));
   box.querySelector('[data-trtype]')?.addEventListener('change', e => commit(() => { c.transition = {type: e.target.value, dur: c.transition?.dur || 0.6}; }));
   box.querySelector('[data-trdur]')?.addEventListener('change', e => commit(() => { c.transition = {type: c.transition?.type || 'crossfade', dur: clamp(+e.target.value || 0.6, 0.1, 5)}; }));
+  box.querySelector('[data-capstyle]')?.addEventListener('change', e => { captionStyle = e.target.value; store.set('ve-capstyle', captionStyle); });
+  box.querySelectorAll('[data-align2]').forEach(b => b.onclick = () => commit(() => {
+    const k = b.dataset.align2;
+    if (k === 'l') c.x = 0; if (k === 'c') c.x = 0.5 - c.w / 2; if (k === 'r') c.x = 1 - c.w;
+    if (k === 't') c.y = 0; if (k === 'm') c.y = 0.5 - c.h / 2; if (k === 'b') c.y = 1 - c.h;
+  }));
   box.querySelector('[data-loopfx]')?.addEventListener('change', e => commit(() => { c.loop_fx = e.target.value; }));
   box.querySelectorAll('[data-anim]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.anim; c[k] = {type: el.value, dur: c[k]?.dur || 0.6}; })));
   box.querySelectorAll('[data-animdur]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.animdur; c[k] = {type: c[k]?.type || 'fade', dur: clamp(+el.value || 0.6, 0.1, 5)}; })));
@@ -1411,8 +1485,10 @@ $('#veOpen').onclick = async () => {
 };
 
 /* ---------------------------------------------------------------- export */
-function renderTextImages() {
-  const out = {}, W = P().width, H = P().height;
+function renderTextImages(scale = 1) {
+  // Same rounding as _even() in studio/video.py so text images match the export size exactly.
+  const even = v => { const n = Math.max(2, Math.round(v)); return n + (n % 2); };
+  const out = {}, W = even(P().width * scale), H = even(P().height * scale);
   const off = document.createElement('canvas'); off.width = W; off.height = H;
   const ctx = off.getContext('2d');
   const plan = motionPlan(P());
@@ -1446,7 +1522,8 @@ $('#veExportForm').addEventListener('submit', async e => {
   $('#veExGo').disabled = true; $('#veExMsg').className = 'msg'; $('#veExMsg').textContent = 'Preparing…';
   try {
     await document.fonts?.ready;
-    const body = {project: P(), text_images: renderTextImages(), quality: form.get('quality'), lufs: form.get('lufs')};
+    const res = +form.get('resolution') || 1080, scale = res / Math.min(P().width, P().height);
+    const body = {project: P(), text_images: renderTextImages(scale), quality: form.get('quality'), lufs: form.get('lufs'), resolution: res};
     const r = await jsonPost(`/api/video/projects/${P().id}/export`, body);
     st.job = r.job.id; st.dirty = false; $('#veSaved').textContent = 'Saved';
     $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExMsg').textContent = 'Exporting…';

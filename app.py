@@ -364,16 +364,25 @@ def media_delete(mid):
 
 @app.get('/api/recordings/<rid>/cues')
 def take_cues(rid):
-    """Caption cues of a voice take, so the editor can lay them out as on-screen text."""
+    """Caption cues (with word timings) of a voice take, for on-screen captions in the editor."""
+    from studio.captions import spread_words
     path = _take_path(rid, 'srt')
-    cues = []
+    try:
+        meta = json.loads((OUT / f'{rid}.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        meta = {}
+    if isinstance(meta.get('cues'), list) and meta['cues']:
+        return jsonify({'cues': meta['cues']})
+    cues = []  # older takes: read the SRT and estimate word timings
     for block in path.read_text(encoding='utf-8').strip().split('\n\n'):
         lines = block.strip().splitlines()
         if len(lines) < 3 or '-->' not in lines[1]:
             continue
         a, b = (x.strip() for x in lines[1].split('-->'))
         to_s = lambda ts: sum(float(x) * m for x, m in zip(ts.replace(',', '.').split(':'), (3600, 60, 1)))
-        cues.append({'start': round(to_s(a), 3), 'end': round(to_s(b), 3), 'text': '\n'.join(lines[2:])})
+        cue = {'start': round(to_s(a), 3), 'end': round(to_s(b), 3), 'text': '\n'.join(lines[2:])}
+        cue['words'] = spread_words(cue)
+        cues.append(cue)
     return jsonify({'cues': cues})
 
 
@@ -426,7 +435,9 @@ def project_export(pid):
     lufs = None if lufs in (None, '', 'off') else vid._num(lufs, -30, -8, -14)
     quality = body.get('quality') if body.get('quality') in ('high', 'standard', 'small') else 'high'
     try:
-        job = exports.start(project, _resolve_media, body.get('text_images') or {}, lufs=lufs, quality=quality)
+        res = body.get('resolution')
+        res = int(res) if res in (720, 1080, 1440, 2160, '720', '1080', '1440', '2160') else None
+        job = exports.start(project, _resolve_media, body.get('text_images') or {}, lufs=lufs, quality=quality, resolution=res)
     except (ValueError, RuntimeError) as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify({'job': job})

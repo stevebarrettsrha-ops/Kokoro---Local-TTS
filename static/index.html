@@ -465,6 +465,9 @@
     <div class="dialog-head"><h2 id="veExTitle">Export video</h2><button class="icon-btn" value="close" formnovalidate aria-label="Close">×</button></div>
     <p class="muted" id="veExSummary"></p>
     <div class="row two">
+      <label class="mini">Resolution
+        <select class="input" name="resolution"><option value="720">720p · smaller, faster</option><option value="1080" selected>1080p · Full HD</option><option value="1440">1440p</option><option value="2160">4K (2160p) · slow</option></select>
+      </label>
       <label class="mini">Quality
         <select class="input" name="quality"><option value="high">High (best for uploading)</option><option value="standard">Standard</option><option value="small">Smaller file</option></select>
       </label>
@@ -515,6 +518,7 @@
 </dialog>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs id="veFilterDefs"></defs></svg>
+<div class="ve-menu" id="veMenu" hidden role="menu"></div>
 <audio id="audio" preload="auto"></audio>
 <input type="file" id="fileInput" accept=".txt,.md,.json,text/plain,application/json" hidden>
 <div class="toast" id="toast" role="alert"></div>

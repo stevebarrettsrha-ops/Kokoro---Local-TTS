@@ -390,6 +390,8 @@ def sanitize_text(t):
         'bg': bg, 'align': t.get('align') if t.get('align') in ('left', 'center', 'right') else 'center',
         'italic': bool(t.get('italic')), 'shadow': bool(t.get('shadow', True)), 'upper': bool(t.get('upper')),
         'outline': bool(t.get('outline')),
+        'hl_word': int(t['hl_word']) if isinstance(t.get('hl_word'), int) and 0 <= t['hl_word'] < 1000 else None,
+        'hl_color': t.get('hl_color') if isinstance(t.get('hl_color'), str) and COLOR_RE.fullmatch(t['hl_color']) else '#ffd400',
         'effect': t.get('effect') if t.get('effect') in ('none', 'shadow', 'lift', 'hollow', 'splice', 'outline', 'echo',
                                                           'glitch', 'neon', 'background') else None,
         'fx_color': t.get('fx_color') if isinstance(t.get('fx_color'), str) and COLOR_RE.fullmatch(t['fx_color']) else '#000000',
@@ -956,7 +958,7 @@ class ExportJobs:
             self._encoder = 'libx264' if 'libx264' in out else 'mpeg4'
         return self._encoder
 
-    def start(self, project, resolve, text_images, *, lufs=None, quality='high'):
+    def start(self, project, resolve, text_images, *, lufs=None, quality='high', resolution=None):
         exe = tools()['ffmpeg']
         if not exe:
             raise RuntimeError('ffmpeg is required to export video: sudo apt install ffmpeg')
@@ -965,6 +967,9 @@ class ExportJobs:
         with self.lock:
             if any(j['status'] == 'running' for j in self.jobs.values()):
                 raise ValueError('An export is already running. Wait for it to finish.')
+        if resolution:  # export at another size: same layout, scaled (text images arrive at this size)
+            k = float(resolution) / min(project['width'], project['height'])
+            project = {**project, 'width': _even(project['width'] * k), 'height': _even(project['height'] * k)}
         job_id = uuid.uuid4().hex
         tmp = Path(tempfile.mkdtemp(prefix='kokoro-export-'))
         pngs = {}

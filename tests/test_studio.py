@@ -398,3 +398,20 @@ def test_cloning_installer_runs_setup_script(tmp_path):
             break
         time.sleep(0.05)
     assert inst.status()['status'] == 'failed' and inst.status()['code'] == 3
+
+
+def test_takes_store_word_timed_cues(engine, tmp_path, monkeypatch):
+    import app as server
+    monkeypatch.setattr(server, 'engine', engine)
+    monkeypatch.setattr(server, 'OUT', engine.out)
+    meta = engine.synthesize({'text': 'Every morning the harbour wakes up early. Then the boats go out.', 'rate': 24000})
+    cues = server.app.test_client().get(f"/api/recordings/{meta['id']}/cues").get_json()['cues']
+    words = [w for c in cues for w in c['words']]
+    assert [w['w'] for w in words][:3] == ['Every', 'morning', 'the']
+    assert all(a['s'] <= b['s'] for a, b in zip(words, words[1:]))
+    # Older takes without stored cues fall back to the SRT with estimated word times.
+    j = json.loads((engine.out / f"{meta['id']}.json").read_text())
+    j.pop('cues')
+    (engine.out / f"{meta['id']}.json").write_text(json.dumps(j))
+    old = server.app.test_client().get(f"/api/recordings/{meta['id']}/cues").get_json()['cues']
+    assert old[0]['words'][0]['w'] == 'Every' and old[0]['words'][-1]['e'] <= old[0]['end'] + 1e-6

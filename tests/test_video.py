@@ -316,3 +316,22 @@ def test_canva_animations_export(tmp_path, assets):
             break
         time.sleep(0.1)
     assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])
+
+
+def test_export_resolution_and_highlight_text(tmp_path, assets):
+    p = vid.sanitize_project({'format': '9:16', 'fps': 15, 'clips': [
+        {'id': 'c', 'kind': 'color', 'color': '#336699', 'start': 0, 'duration': 1},
+        {'id': 't', 'kind': 'text', 'start': 0, 'duration': 1, 'text': {'content': 'one two', 'hl_word': 1, 'hl_color': '#ffd400'}}]})
+    assert p['clips'][1]['text']['hl_word'] == 1
+    png = 'data:image/png;base64,' + base64.b64encode((assets / 'text.png').read_bytes()).decode()
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(p, lambda m: (None, False), {'t': png}, quality='small', resolution=240)
+    for _ in range(300):
+        if jobs.get(job['id'])['status'] != 'running':
+            break
+        time.sleep(0.1)
+    done = jobs.get(job['id'])
+    assert done['status'] == 'done', done
+    wh = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0',
+                         str(jobs.export_path(done['file']))], capture_output=True, text=True).stdout.split()[0]
+    assert wh == '240,428'  # 426.7 rounded up to even, same rule as the browser's text images

@@ -452,6 +452,7 @@ class Engine:
             'seconds': round(len(y) / rate, 2), 'rate': rate, 'created': datetime.now(timezone.utc).isoformat(),
             'chunks': len(segments), 'lufs': report['lufs'], 'true_peak': report['true_peak'],
             'target_lufs': cfg['lufs'], 'mp3': bool(has_mp3), 'captions': len(cues), 'fit': info,
+            'cues': cues,
             'warnings': warnings, 'segments': segments, 'text': text, 'settings': settings,
         }
         (self.out / f'{rid}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')

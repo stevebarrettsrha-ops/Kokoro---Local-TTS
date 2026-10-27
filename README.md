@@ -68,19 +68,34 @@ Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar s
 
 ## Video editor
 
-The **Video** tab is a Canva-style editor built into the studio. It runs entirely on your computer; ffmpeg does the final render.
+The **Video** tab is a Canva-style editor built into the studio. It runs entirely on your computer; ffmpeg does the final render, and the preview uses the same rules, so the file matches what you saw.
 
-- **Create a video**: pick Landscape, YouTube, YouTube Shorts, TikTok, Instagram Reel, Facebook, Instagram post or Square, and the frame is set up for you. You can change the format at any time.
-- **Uploads**: drop in pictures (JPG, PNG, WebP), video (MP4, MOV including iPhone HEVC, WebM, MKV) or music (MP3, WAV, M4A…). **Record yourself** captures camera and mic straight into your uploads. Videos the browser can't play get a lightweight preview copy; the export always uses the original.
-- **Voices**: every take from the Script tab, built-in or cloned, is here. **Add with captions** puts the voice on the Voice track and its words on the Text track, timed from the voice. You can also click **→ Video** after rendering, or **Add to video** in Takes.
-- **Text**: presets (title, subtitle, lower third, caption, headline, quote, scripture, neon, glitch) and Canva-style effects: Shadow, Lift, Hollow, Splice, Outline, Echo, Glitch, Neon and Background.
-- **Shapes**: colour blocks and overlays (dim overlay, bottom band, side panel, letterbox bars).
-- **Transitions**: hover the line between two scenes on a track and click **+**, or use the panel on the right. Choose Crossfade, Dip to background, Slide left/right/up/down or Zoom. **Use for every scene change** applies one to the whole track.
-- **Animations**: every picture, clip, text or shape can have an entrance and an exit (Fade, Rise, Drop, four Slides, Pop, Zoom). Title presets come animated. **Preview animation** plays just that moment.
-- **Timeline**: Text, Layer 3, Layer 2 and Main tracks for visuals (higher tracks draw on top), plus Voice, Music and Sound tracks for audio. Pictures and clips you add play one after another on Main. Drag clips to move them and drag edges to trim. **S** splits, **Del** deletes, **Ctrl+D** duplicates and **Ctrl+Z** undoes. Snapping lines up clip edges and the playhead.
-- **On the picture**: drag to move, use the corners to resize (Shift stretches), and guides help you centre things.
-- **Properties**: position, crop or fit, opacity, fades, slow zoom (Ken Burns), volume and mute.
-- **Export MP4**: H.264/AAC at the project size. You can optionally even the sound out to −14 LUFS for YouTube and social. Text, transitions and animations are computed by the same rules in the preview and the export, so the file matches what you saw.
+**Making a video**
+- **Create a video**: Landscape, YouTube, YouTube Shorts, TikTok, Instagram Reel, Facebook, Instagram post or Square.
+- **Uploads**: pictures (JPG, PNG, WebP, TIFF; phone photos are turned upright), video (MP4, MOV including iPhone HEVC, WebM, MKV) and music. Drop files anywhere, even straight onto a track. **Record yourself** uses your camera and mic.
+- **Voices**: every take from the Script tab, built-in or cloned. **Add with captions** puts the voice on the Voice track and its words on screen, timed from the voice. There are three caption styles: *Classic*, *Highlight the spoken word* (karaoke-style), and *One word at a time*.
+- **Text**: presets (title, subtitle, lower third, caption, headline, quote, scripture, neon, glitch) with Canva-style effects: Shadow, Lift, Hollow, Splice, Outline, Echo, Glitch, Neon and Background.
+- **Shapes**: colour blocks and overlays.
+
+**Cutting, trimming and stretching**
+- Drag clip edges to trim. **S** splits, **Q** and **W** trim the start or end to the playhead, **Delete** removes, **Ctrl+D** duplicates, **Ctrl+C/X/V** copy, cut and paste, **M** mutes and **Ctrl+Z** undoes. You can also right-click a clip for these.
+- **Magnetic main track**: scenes play back to back, so deleting or trimming one closes the gap and dragging reorders. It can be switched off.
+- **Speed** 0.25×–2× for video and audio. As in Canva, faster means shorter.
+- **Alt+drag** slides which part of a video or song plays, without moving it (Canva's "Adjust").
+- **Extend**: drag a video past its end and its last frame holds, shown striped. **Loop to fill the clip** repeats music or video. **Freeze frame** inserts a 2-second still at the playhead.
+- Audio clips show their waveform.
+
+**Transitions and animations**
+- **Transitions**: hover between two scenes and click **+**. Choose Dissolve, Dip to background, Slide (4 directions), Line wipe (4 directions), Circle wipe, Clock wipe, Split open or Zoom. "Use for every scene change" applies one everywhere.
+- **Entrance and exit animations**: Fade, Rise, Drop, Pan, Wipe, Baseline, Slides, Pop, Zoom, Tumble, and Typewriter (text).
+- **While on screen**: Breathe or Drift.
+
+**Photo and video**
+- **Filters**: Vivid, Warm, Cool, Mono, Noir, Sepia, Fade and Retro.
+- **Adjust**: brightness, contrast, saturation, warmth and blur.
+- **Layout**: rotate, flip, rounded corners, crop or fit, opacity, slow zoom (Ken Burns), and align buttons.
+
+**Export MP4**: 720p, 1080p, 1440p or 4K, a quality choice, and optional loudness evening (−14 LUFS for YouTube/social).
 
 Everything the editor makes lives in one folder inside the app, which is not committed to git:
 

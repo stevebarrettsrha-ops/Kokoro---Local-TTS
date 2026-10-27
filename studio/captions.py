@@ -109,7 +109,8 @@ def build_cues(sentences):
             cues.append(group)
     out = []
     for g in cues:
-        out.append({'start': g[0]['start'], 'end': g[-1]['end'], 'text': _wrap(' '.join(x['w'] for x in g))})
+        out.append({'start': g[0]['start'], 'end': g[-1]['end'], 'text': _wrap(' '.join(x['w'] for x in g)),
+                    'words': [{'w': x['w'], 's': round(x['start'], 3), 'e': round(x['end'], 3)} for x in g]})
     # Give short cues reading time without overlapping the next one.
     for i, c in enumerate(out):
         nxt = out[i + 1]['start'] if i + 1 < len(out) else c['end'] + 2
@@ -135,3 +136,15 @@ def to_srt(cues):
 def to_vtt(cues):
     blocks = [f'{_ts(c["start"], ".")} --> {_ts(c["end"], ".")}\n{c["text"]}\n' for c in cues]
     return 'WEBVTT\n\n' + '\n'.join(blocks)
+
+
+def spread_words(cue):
+    """Word timings for a cue that only has text (older takes): share its span by word length."""
+    words = cue['text'].split()
+    total = float(sum(len(w) + 1 for w in words)) or 1.0
+    out, t = [], cue['start']
+    for w in words:
+        d = (cue['end'] - cue['start']) * (len(w) + 1) / total
+        out.append({'w': w, 's': round(t, 3), 'e': round(t + d, 3)})
+        t += d
+    return out
