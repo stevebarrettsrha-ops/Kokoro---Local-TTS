@@ -266,3 +266,30 @@ def test_freeze_frame_and_peaks(tmp_path, assets):
     assert lib.peaks(still['id']) is None
     with pytest.raises(ValueError):
         lib.freeze_frame(still['id'], 0)
+
+
+def test_adjustments_rotation_rounding_export(tmp_path, assets):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    photo = lib.add((assets / 'photo.png').read_bytes(), 'photo.png')
+    clip = lib.add((assets / 'clip.mp4').read_bytes(), 'clip.mp4')
+    m, off = vid.color_matrix(vid.sanitize_adjust({}))
+    assert abs(m - __import__('numpy').eye(3)).max() < 1e-9 and abs(off).max() < 1e-9
+    assert vid._adjust_filters({'adjust': vid.sanitize_adjust({})}, 100, 100) == []
+    clips = [
+        {'id': 'a', 'kind': 'image', 'media': photo['id'], 'start': 0, 'duration': 2, 'adjust': {'tone': 'sepia', 'contrast': 0.3, 'blur': 0.2},
+         'rotate': 30, 'radius': 0.4, 'flip_h': True, 'x': 0.1, 'y': 0.1, 'w': 0.5, 'h': 0.5},
+        {'id': 'b', 'kind': 'video', 'media': clip['id'], 'start': 0, 'duration': 2, 'lane': 'V2', 'radius': 0.5, 'flip_v': True,
+         'adjust': {'saturation': -1}, 'transition': {'type': 'none'}},
+        {'id': 'c', 'kind': 'color', 'color': '#ff0000', 'lane': 'V3', 'start': 1, 'duration': 1, 'rotate': -45, 'radius': 0.2,
+         'anim_in': {'type': 'pop', 'dur': 0.4}},
+    ]
+    p = vid.sanitize_project({'fps': 15, 'clips': clips}, lib)
+    assert p['clips'][0]['adjust']['tone'] == 'sepia' and p['clips'][0]['rotate'] == 30 and p['clips'][2].get('adjust') is None
+    p['width'], p['height'] = 192, 108
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(p, lambda mid: (lib.path(mid), bool(lib.get(mid).get('has_audio'))), {}, quality='small')
+    for _ in range(600):
+        if jobs.get(job['id'])['status'] != 'running':
+            break
+        time.sleep(0.1)
+    assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])

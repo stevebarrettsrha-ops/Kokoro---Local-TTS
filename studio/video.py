@@ -390,6 +390,67 @@ def sanitize_text(t):
     }
 
 
+FILTER_PRESETS = {
+    'none': {}, 'vivid': {'saturation': 0.35, 'contrast': 0.1}, 'warm': {'warmth': 0.6, 'saturation': 0.1},
+    'cool': {'warmth': -0.6}, 'mono': {'tone': 'mono', 'contrast': 0.1},
+    'noir': {'tone': 'mono', 'contrast': 0.45, 'brightness': -0.05}, 'sepia': {'tone': 'sepia'},
+    'fade': {'contrast': -0.25, 'saturation': -0.2, 'brightness': 0.05},
+    'retro': {'warmth': 0.4, 'saturation': -0.25, 'contrast': -0.1},
+}
+
+
+def sanitize_adjust(a):
+    a = a if isinstance(a, dict) else {}
+    out = {k: round(_num(a.get(k), -1, 1, 0), 3) for k in ('brightness', 'contrast', 'saturation', 'warmth')}
+    out['blur'] = round(_num(a.get('blur'), 0, 1, 0), 3)
+    out['tone'] = a.get('tone') if a.get('tone') in ('mono', 'sepia') else ''
+    return out
+
+
+def color_matrix(adj):
+    """3x3 matrix + offset (0-1 units) for the colour adjustments; mirrors colorMatrix() in video.js.
+
+    Applied in order: brightness, contrast, saturation, tone (mono/sepia), warmth.
+    """
+    import numpy as np
+    kb, kc, ks = 1 + adj['brightness'], 1 + adj['contrast'], 1 + adj['saturation']
+    m = np.eye(3) * kb
+    off = np.zeros(3)
+    m, off = kc * m, kc * off + 0.5 * (1 - kc)
+
+    def sat(v):
+        return np.array([[0.213 + 0.787 * v, 0.715 - 0.715 * v, 0.072 - 0.072 * v],
+                         [0.213 - 0.213 * v, 0.715 + 0.285 * v, 0.072 - 0.072 * v],
+                         [0.213 - 0.213 * v, 0.715 - 0.715 * v, 0.072 + 0.928 * v]])
+    steps = [sat(ks)]
+    if adj['tone'] == 'mono':
+        steps.append(sat(0))
+    elif adj['tone'] == 'sepia':
+        steps.append(np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]]))
+    w = adj['warmth']
+    steps.append(np.diag([1 + 0.2 * w, 1 + 0.04 * w, 1 - 0.2 * w]))
+    for t in steps:
+        m, off = t @ m, t @ off
+    return m, off
+
+
+def _adjust_filters(c, W, H):
+    adj = c.get('adjust')
+    if not adj:
+        return []
+    out = []
+    m, off = color_matrix(adj)
+    import numpy as np
+    if not (np.allclose(m, np.eye(3), atol=1e-4) and np.allclose(off, 0, atol=1e-4)):
+        names = 'rgb'
+        out.append('colorchannelmixer=' + ':'.join(f'{names[i]}{names[j]}={m[i][j]:.5f}' for i in range(3) for j in range(3)))
+        if not np.allclose(off, 0, atol=1e-4):
+            out.append('lutrgb=' + ':'.join(f"{names[i]}='clip(val+{off[i] * 255:.3f},0,255)'" for i in range(3)))
+    if adj['blur'] > 0:
+        out.append(f'gblur=sigma={adj["blur"] * 0.02 * min(W, H):.2f}')
+    return out
+
+
 def sanitize_anim(a, allowed=ANIMS):
     a = a if isinstance(a, dict) else {}
     kind = a.get('type') if a.get('type') in allowed else 'none'
@@ -434,6 +495,11 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
             'speed': round(_num(c.get('speed'), 0.25, 2, 1), 3), 'loop': bool(c.get('loop')),
         }
         if kind != 'audio':
+            clip['rotate'] = round(_num(c.get('rotate'), -180, 180, 0), 2)
+            clip['radius'] = round(_num(c.get('radius'), 0, 0.5, 0), 3)
+            clip['flip_h'], clip['flip_v'] = bool(c.get('flip_h')), bool(c.get('flip_v'))
+            if kind in ('image', 'video'):
+                clip['adjust'] = sanitize_adjust(c.get('adjust'))
             clip['anim_in'] = sanitize_anim(c.get('anim_in'))
             clip['anim_out'] = sanitize_anim(c.get('anim_out'))
             clip['transition'] = sanitize_anim(c.get('transition'), TRANSITIONS)
@@ -645,7 +711,7 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(png))
             bx, by = 0, 0  # text images are full frame with the text already placed
             chain.append('format=rgba')
-            if needs_scale:  # crop to the text box (plus room for glows) so it scales around itself
+            if needs_scale or c.get('rotate'):  # crop to the text box (plus room for glows) so it scales/turns around itself
                 m = int(c['text']['size'] * min(W, H) + 0.25 * bh)
                 x0, y0 = max(0, int(c['x'] * W) - m), max(0, int(c['y'] * H) - m)
                 x1, y1 = min(W, int((c['x'] + c['w']) * W) + m), min(H, int((c['y'] + c['h']) * H) + m)
@@ -681,8 +747,22 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                     chain.append(f'scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh}')
                 chain.append('setsar=1')
             chain.append(f'fps={fps},format=rgba')
+            chain += _adjust_filters(c, W, H)
             if c['kind'] == 'video' and has_audio and not c['muted'] and c['volume'] > 0:
                 audio_labels.append(_audio_chain(fc, f'{idx}:a', c, len(audio_labels)))
+        if c.get('flip_h'):
+            chain.append('hflip')
+        if c.get('flip_v'):
+            chain.append('vflip')
+        if c.get('radius', 0) > 0 and c['kind'] != 'text':
+            # Rounded corners: multiply the clip's alpha by a rounded-rectangle mask (built once, then repeated).
+            r = c['radius'] * min(bw, bh)
+            fc.append(f"color=c=black:s={bw}x{bh}:r={fps}:d=0.1,format=gray,geq=lum='255*clip({r:.2f}-hypot("
+                      f"max(abs(X-W/2)-(W/2-{r:.2f}),0),max(abs(Y-H/2)-(H/2-{r:.2f}),0))+0.5,0,1)',"
+                      f"loop=loop=-1:size=1,trim=duration={dur:.3f},setpts=N/({fps}*TB)[rm{k}]")
+            rounding = k
+        else:
+            rounding = None
         if opacity < 0.999:
             chain.append(f'colorchannelmixer=aa={opacity:.3f}')
         if c['fade_in'] > 0:
@@ -695,6 +775,7 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 d = min(anim[1] * MOTION[anim[0]][3], dur)
                 st_ = 0 if which == 'in' else dur - d
                 chain.append(f'fade=t={which}:st={st_:.3f}:d={d:.3f}:alpha=1')
+        rot = c.get('rotate', 0) or 0
         split_at = len(chain)
         dx, dy, scale = _motion_exprs(start, dur, mp['in'], mp['out'])
         ow, oh = text_box or ((bw, bh) if c['kind'] != 'text' else (W, H))
@@ -702,21 +783,34 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             pw, ph = _even(ow * 1.32), _even(oh * 1.32)
             chain.append(f"scale=w='trunc(max(2,{ow}*{scale})/2)*2':h='trunc(max(2,{oh}*{scale})/2)*2':eval=frame")
             chain.append(f'pad=w={pw}:h={ph}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame')
+        if rot:
+            ang = f'{rot * 3.141592653589793 / 180:.5f}'
+            chain.append(f'rotate=a={ang}:ow=rotw({ang}):oh=roth({ang}):c=none')
         chain.append(f'setpts=PTS-STARTPTS+{start:.3f}/TB')
+        if rounding is not None:
+            # Rounding must happen before any motion/rotation: apply it as a separate step on the content.
+            pre, post = chain[:split_at], chain[split_at:]
+            fc.append(f'[{idx}:v]' + ','.join(pre) + f',split[rc{k}][rd{k}]')
+            fc.append(f'[rd{k}]alphaextract[re{k}]')
+            fc.append(f'[re{k}][rm{k}]blend=all_mode=multiply[rf{k}]')
+            fc.append(f'[rc{k}][rf{k}]alphamerge[rg{k}]')
+            src_label, chain, split_at = f'rg{k}', post, 0
+        else:
+            src_label = f'{idx}:v'
         mask = mp.get('mask')
         if mask and mask[1] < dur - 0.05:
             # Only the transition's first moments go through the (slow) per-pixel mask.
             d = mask[1]
-            fc.append(f'[{idx}:v]' + ','.join(chain[:split_at]) + f',split[mA{k}][mB{k}]')
+            fc.append(f'[{src_label}]' + (','.join(chain[:split_at]) + ',' if split_at else '') + f'split[mA{k}][mB{k}]')
             fc.append(f"[mA{k}]trim=0:{d:.3f},setpts=PTS-STARTPTS,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
                       f"a='alpha(X,Y)*{_mask_alpha(mask[0], d)}'[mC{k}]")
             fc.append(f'[mB{k}]trim=start={d:.3f},setpts=PTS-STARTPTS[mD{k}]')
             fc.append(f'[mC{k}][mD{k}]concat=n=2:v=1:a=0,' + ','.join(chain[split_at:]) + f'[v{k}]')
         else:
-            fc.append(f'[{idx}:v]' + ','.join(chain) + f'[v{k}]')
+            fc.append(f'[{src_label}]' + ','.join(chain) + f'[v{k}]')
         nxt = f'base{k + 1}'
-        x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (scale or dx != '0') else str(bx)
-        y = f"{by}+{H}*({dy})-(h-{oh})/2" if (scale or dy != '0') else str(by)
+        x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (scale or rot or dx != '0') else str(bx)
+        y = f"{by}+{H}*({dy})-(h-{oh})/2" if (scale or rot or dy != '0') else str(by)
         fc.append(f"[{base}][v{k}]overlay=x='{x}':y='{y}':eof_action=pass:format=auto:"
                   f"enable='between(t,{start:.3f},{start + dur:.3f})'[{nxt}]")
         base = nxt

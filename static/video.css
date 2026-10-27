@@ -173,3 +173,8 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 .ve-clip .frozen { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none;
   background: repeating-linear-gradient(135deg, rgb(255 255 255 / .28) 0 4px, transparent 4px 8px); border-left: 1px dashed rgb(255 255 255 / .8); }
 .ve-clip .spd { position: absolute; right: 8px; top: 1px; font: 600 10px var(--mono); font-style: normal; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }
+.ve-filters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.ve-filter { border: 1px solid var(--line); background: var(--bg); border-radius: var(--radius); padding: 3px; display: grid; gap: 2px; font-size: 11px; color: var(--ink-2); }
+.ve-filter canvas { width: 100%; height: auto; border-radius: 2px; display: block; }
+.ve-filter[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); color: var(--ink); }
+.ve-btnrow .btn[aria-pressed="true"] { background: var(--ink); color: var(--surface); }

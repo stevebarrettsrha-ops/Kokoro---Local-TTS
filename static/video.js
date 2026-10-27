@@ -514,6 +514,43 @@ function hexToRgba(hex) {
 const EFFECTS = ['none', 'shadow', 'lift', 'hollow', 'splice', 'outline', 'echo', 'glitch', 'neon', 'background'];
 function effectOf(t) { return EFFECTS.includes(t.effect) ? t.effect : t.outline ? 'outline' : t.shadow ? 'shadow' : 'none'; }
 function withAlpha(rgba, a) { return rgba.replace(/[\d.]+\)$/, `${a})`); }
+/* Colour adjustments: same matrix as color_matrix() in studio/video.py, applied in the preview through an
+   SVG feColorMatrix (sRGB) so it matches the exported colours. */
+const FILTER_PRESETS = {none: {}, vivid: {saturation: 0.35, contrast: 0.1}, warm: {warmth: 0.6, saturation: 0.1}, cool: {warmth: -0.6},
+  mono: {tone: 'mono', contrast: 0.1}, noir: {tone: 'mono', contrast: 0.45, brightness: -0.05}, sepia: {tone: 'sepia'},
+  fade: {contrast: -0.25, saturation: -0.2, brightness: 0.05}, retro: {warmth: 0.4, saturation: -0.25, contrast: -0.1}};
+const ADJ_ZERO = {brightness: 0, contrast: 0, saturation: 0, warmth: 0, blur: 0, tone: ''};
+const mul = (a, b) => a.map(r => [0, 1, 2].map(j => r[0] * b[0][j] + r[1] * b[1][j] + r[2] * b[2][j]));
+const mulv = (a, v) => a.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
+function colorMatrix(adj) {
+  const kb = 1 + adj.brightness, kc = 1 + adj.contrast, ks = 1 + adj.saturation;
+  let m = [[kb * kc, 0, 0], [0, kb * kc, 0], [0, 0, kb * kc]], off = [0.5 * (1 - kc), 0.5 * (1 - kc), 0.5 * (1 - kc)];
+  const sat = v => [[0.213 + 0.787 * v, 0.715 - 0.715 * v, 0.072 - 0.072 * v], [0.213 - 0.213 * v, 0.715 + 0.285 * v, 0.072 - 0.072 * v],
+    [0.213 - 0.213 * v, 0.715 - 0.715 * v, 0.072 + 0.928 * v]];
+  const steps = [sat(ks)];
+  if (adj.tone === 'mono') steps.push(sat(0));
+  else if (adj.tone === 'sepia') steps.push([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]]);
+  const w = adj.warmth; steps.push([[1 + 0.2 * w, 0, 0], [0, 1 + 0.04 * w, 0], [0, 0, 1 - 0.2 * w]]);
+  for (const t of steps) { m = mul(t, m); off = mulv(t, off); }
+  return {m, off};
+}
+function isPlainAdjust(a) { return !a || (!a.brightness && !a.contrast && !a.saturation && !a.warmth && !a.tone); }
+function canvasFilter(c, W, H) {
+  const a = c.adjust, parts = [];
+  if (a && !isPlainAdjust(a)) {
+    const id = 'vef-' + c.id, {m, off} = colorMatrix(a);
+    const values = [0, 1, 2].map(i => `${m[i].map(v => v.toFixed(5)).join(' ')} 0 ${off[i].toFixed(5)}`).join(' ') + ' 0 0 0 1 0';
+    let f = document.getElementById(id);
+    if (!f) {
+      f = document.createElementNS('http://www.w3.org/2000/svg', 'filter'); f.id = id; f.setAttribute('color-interpolation-filters', 'sRGB');
+      f.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'feColorMatrix')); $('#veFilterDefs').appendChild(f);
+    }
+    const fe = f.firstChild; fe.setAttribute('type', 'matrix'); if (fe.getAttribute('values') !== values) fe.setAttribute('values', values);
+    parts.push(`url(#${id})`);
+  }
+  if (a?.blur > 0) parts.push(`blur(${(a.blur * 0.02 * Math.min(W, H)).toFixed(2)}px)`);
+  return parts.join(' ') || 'none';
+}
 /* Shared by preview and export: draws a text clip into a W×H frame. */
 function drawText(ctx, c, W, H) {
   const t = c.text, fs = t.size * Math.min(W, H);  // same look in landscape and vertical
@@ -597,6 +634,17 @@ function draw() {
     ctx.translate(m.dx * W, m.dy * H);
     if (m.sc !== 1) { const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H; ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.translate(-cx, -cy); }
     applyMask(ctx, c, plan[c.id], t, W, H);
+    {
+      const bx = c.kind === 'text' ? 0 : c.x * W, by = c.kind === 'text' ? 0 : c.y * H;
+      const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H;
+      if (c.rotate) { ctx.translate(cx, cy); ctx.rotate(c.rotate * Math.PI / 180); ctx.translate(-cx, -cy); }
+      if (c.flip_h || c.flip_v) { ctx.translate(cx, cy); ctx.scale(c.flip_h ? -1 : 1, c.flip_v ? -1 : 1); ctx.translate(-cx, -cy); }
+      if (c.radius > 0 && c.kind !== 'text') {
+        const r = c.radius * Math.min(c.w * W, c.h * H);
+        roundRect(ctx, c.x * W, c.y * H, c.w * W, c.h * H, r); ctx.clip();
+      }
+      void bx; void by;
+    }
     ctx.globalAlpha = c.opacity * (t < c.start + c.duration ? fadeFactor(c, t) : (c.fade_out > 0 ? 0 : 1)) * m.a;
     if (c.kind === 'color') {
       ctx.fillStyle = hexToRgba(c.color); ctx.fillRect(c.x * W, c.y * H, c.w * W, c.h * H);
@@ -604,7 +652,9 @@ function draw() {
       drawText(ctx, c, W, H);
     } else {
       const el = elementFor(c);
-      if (el && (c.kind === 'image' ? el.complete : el.readyState >= 2)) drawMedia(ctx, el, c, W, H, t);
+      if (el && (c.kind === 'image' ? el.complete : el.readyState >= 2)) {
+        ctx.filter = canvasFilter(c, W, H); drawMedia(ctx, el, c, W, H, t); ctx.filter = 'none';
+      }
     }
     ctx.restore();
   }
@@ -954,6 +1004,22 @@ function renderProps() {
       ${c.kind === 'video' || c.kind === 'image' ? `<span class="seg-toggle"><button type="button" data-fit="cover" aria-pressed="${c.fit === 'cover'}" title="Fill the box, cropping edges">Crop</button><button type="button" data-fit="contain" aria-pressed="${c.fit === 'contain'}" title="Show the whole picture">Fit</button></span>` : ''}</div>
       <div class="slider"><label>Opacity</label><output>${Math.round(c.opacity * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${c.opacity}" data-k="opacity"></div>`;
     if (c.kind === 'image') html += `<div class="slider"><label>Slow zoom (Ken Burns)</label><output>${Math.round(c.zoom * 100)}%</output><input type="range" min="0" max="0.4" step="0.01" value="${c.zoom}" data-k="zoom"></div>`;
+    html += `<h3>Rotate &amp; shape</h3>
+      <div class="slider"><label>Rotation</label><output>${Math.round(c.rotate || 0)}°</output><input type="range" min="-180" max="180" step="1" value="${c.rotate || 0}" data-k="rotate"></div>
+      <div class="ve-btnrow"><button type="button" class="btn ghost" data-act="rot90">Rotate 90°</button>
+        ${c.kind !== 'text' ? `<button type="button" class="btn ghost" data-act="fliph" aria-pressed="${!!c.flip_h}">Flip ↔</button><button type="button" class="btn ghost" data-act="flipv" aria-pressed="${!!c.flip_v}">Flip ↕</button>` : ''}</div>
+      ${c.kind !== 'text' ? `<div class="slider"><label>Corner rounding</label><output>${Math.round((c.radius || 0) * 200)}%</output><input type="range" min="0" max="0.5" step="0.01" value="${c.radius || 0}" data-k="radius"></div>` : ''}`;
+    if (c.kind === 'image' || c.kind === 'video') {
+      const a = {...ADJ_ZERO, ...(c.adjust || {})};
+      const current = Object.entries(FILTER_PRESETS).find(([, p]) => Object.keys(ADJ_ZERO).every(k => k === 'blur' || (p[k] ?? ADJ_ZERO[k]) === a[k]))?.[0];
+      html += `<h3>Filters</h3><div class="ve-filters">${Object.keys(FILTER_PRESETS).map(n => `<button type="button" class="ve-filter" data-filter="${n}" aria-pressed="${current === n}">
+          <canvas width="72" height="48" data-fprev="${n}"></canvas><span>${n[0].toUpperCase() + n.slice(1)}</span></button>`).join('')}</div>
+        <h3>Adjust</h3>
+        ${[['brightness', 'Brightness'], ['contrast', 'Contrast'], ['saturation', 'Saturation'], ['warmth', 'Warmth']].map(([k, label]) =>
+          `<div class="slider"><label>${label}</label><output>${Math.round(a[k] * 100)}</output><input type="range" min="-1" max="1" step="0.01" value="${a[k]}" data-adj="${k}"></div>`).join('')}
+        <div class="slider"><label>Blur</label><output>${Math.round(a.blur * 100)}</output><input type="range" min="0" max="1" step="0.01" value="${a.blur}" data-adj="blur"></div>
+        <button type="button" class="link-btn ve-small" data-act="adjreset">Reset adjustments</button>`;
+    }
     html += `<div class="row two"><label class="mini">Layer<select class="input" data-lane>${LANES.filter(l => l.kinds.includes(c.kind)).map(l => `<option value="${l.id}" ${c.lane === l.id ? 'selected' : ''}>${l.label}</option>`).join('')}</select></label></div>`;
   } else {
     html += `<div class="row two"><label class="mini">Track<select class="input" data-lane>${LANES.filter(l => l.kinds.includes('audio')).map(l => `<option value="${l.id}" ${c.lane === l.id ? 'selected' : ''}>${l.label}</option>`).join('')}</select></label></div>`;
@@ -1004,7 +1070,9 @@ function bindProps(c) {
     el.addEventListener('input', () => { if (!pending) pending = snapshot(); apply(); const o = el.parentElement.querySelector('output'); if (o) o.textContent = outFmt(el); renderTimeline(); });
     el.addEventListener('change', () => { if (pending) { st.undo.push(pending); st.redo = []; pending = null; afterChange(); } });
   };
-  const outFmt = el => el.dataset.k === 'opacity' || el.dataset.k === 'volume' || el.dataset.k === 'zoom' ? `${Math.round(el.value * 100)}%`
+  const outFmt = el => el.dataset.k === 'rotate' ? `${Math.round(el.value)}°` : el.dataset.k === 'radius' ? `${Math.round(el.value * 200)}%`
+    : el.dataset.adj !== undefined ? `${Math.round(el.value * 100)}`
+    : el.dataset.k === 'opacity' || el.dataset.k === 'volume' || el.dataset.k === 'zoom' ? `${Math.round(el.value * 100)}%`
     : el.dataset.alpha !== undefined ? `${Math.round(el.value * 100)}%` : el.dataset.t === 'size' ? `${Math.round(el.value * 1000) / 10}` : el.value;
   box.querySelectorAll('[data-k]').forEach(el => {
     const k = el.dataset.k;
@@ -1056,6 +1124,19 @@ function bindProps(c) {
   box.querySelectorAll('[data-animdur]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.animdur; c[k] = {type: c[k]?.type || 'fade', dur: clamp(+el.value || 0.6, 0.1, 5)}; })));
   box.querySelector('[data-lane]')?.addEventListener('change', e => commit(() => { c.lane = e.target.value; }));
   box.querySelector('[data-muted]')?.addEventListener('change', e => commit(() => { c.muted = e.target.checked; }));
+  box.querySelectorAll('[data-adj]').forEach(el => live(el, () => { c.adjust = {...ADJ_ZERO, ...(c.adjust || {}), [el.dataset.adj]: +el.value}; draw(); }));
+  box.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => commit(() => {
+    c.adjust = {...ADJ_ZERO, blur: c.adjust?.blur || 0, ...FILTER_PRESETS[b.dataset.filter]};
+  }));
+  // Filter tiles show this clip's own picture with each preset.
+  const src = c.kind === 'image' ? st.imgs[c.media] : st.els[c.id];
+  box.querySelectorAll('[data-fprev]').forEach(cv => {
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#555'; ctx.fillRect(0, 0, cv.width, cv.height);
+    if (!src || !(src.naturalWidth || src.videoWidth)) return;
+    const fake = {...c, id: c.id + '-p-' + cv.dataset.fprev, x: 0, y: 0, w: 1, h: 1, zoom: 0, fit: 'cover',
+      adjust: {...ADJ_ZERO, ...FILTER_PRESETS[cv.dataset.fprev]}};
+    ctx.filter = canvasFilter(fake, cv.width, cv.height); drawMedia(ctx, src, fake, cv.width, cv.height, c.start); ctx.filter = 'none';
+  });
   const setSpeed = v => commit(() => {
     // Like Canva: faster playback makes the clip shorter (same part of the source plays).
     const old = c.speed || 1; c.speed = clamp(+v, 0.25, 2);
@@ -1068,6 +1149,10 @@ function bindProps(c) {
   box.querySelectorAll('[data-act]').forEach(el => el.onclick = () => {
     const a = el.dataset.act;
     if (a === 'fill') commit(() => Object.assign(c, {x: 0, y: 0, w: 1, h: 1}));
+    if (a === 'rot90') commit(() => { c.rotate = (((c.rotate || 0) + 90 + 180) % 360) - 180; });
+    if (a === 'fliph') commit(() => { c.flip_h = !c.flip_h; });
+    if (a === 'flipv') commit(() => { c.flip_v = !c.flip_v; });
+    if (a === 'adjreset') commit(() => { c.adjust = {...ADJ_ZERO}; });
     if (a === 'center') commit(() => { c.x = 0.5 - c.w / 2; c.y = 0.5 - c.h / 2; });
     if (a === 'captions') addCaptions(c);
     if (a === 'trall') commit(p => { p.clips.forEach(x => { if (x.lane === c.lane && x.kind !== 'audio' && prevAdjacent(p, x)) x.transition = {...c.transition}; }); });
