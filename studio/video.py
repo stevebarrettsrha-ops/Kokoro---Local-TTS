@@ -35,13 +35,19 @@ AUDIO_LANES = ('A1', 'A2', 'A3')
 KINDS = {'video', 'image', 'text', 'color', 'audio'}
 FORMATS = {'16:9': (1920, 1080), '9:16': (1080, 1920), '1:1': (1080, 1080), '4:5': (1080, 1350)}
 MAX_CLIPS = 600
-ANIMS = ('none', 'fade', 'rise', 'drop', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'pop', 'zoom-out')
+ANIMS = ('none', 'fade', 'rise', 'drop', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'pop', 'zoom-out',
+         'pan', 'wipe', 'baseline', 'tumble', 'typewriter')
+LOOP_FX = ('none', 'breathe', 'drift')
+ANIM_ROT = {'tumble': -75.0}                       # degrees at the start of the animation
+ANIM_MASK = {'wipe': 'wipe-right', 'baseline': 'wipe-down'}   # revealed through a moving edge (clip's own frame)
+ANIM_MASK_OUT = {'wipe': 'wipe-left', 'baseline': 'wipe-down'}
 MASK_TRANSITIONS = ('wipe-left', 'wipe-right', 'wipe-up', 'wipe-down', 'circle', 'clock', 'split-v', 'split-h')
 TRANSITIONS = ('none', 'crossfade', 'dip', 'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom') + MASK_TRANSITIONS
 # Motion of an animation: (dx, dy) in frame widths/heights at the start, scale at the start, alpha share.
 MOTION = {'fade': (0, 0, 1, 1), 'rise': (0, 0.06, 1, 1), 'drop': (0, -0.06, 1, 1), 'slide-left': (1, 0, 1, 0),
           'slide-right': (-1, 0, 1, 0), 'slide-up': (0, 1, 1, 0), 'slide-down': (0, -1, 1, 0), 'pop': (0, 0, 0.5, 0.5),
-          'zoom-out': (0, 0, 1.3, 1)}
+          'zoom-out': (0, 0, 1.3, 1), 'pan': (0.15, 0, 1, 1), 'wipe': (0, 0, 1, 0), 'baseline': (0, 0.05, 1, 0),
+          'tumble': (0, 0, 0.5, 1), 'typewriter': (0, 0, 1, 0)}
 TRANSITION_ANIM = {'crossfade': 'fade', 'slide-left': 'slide-left', 'slide-right': 'slide-right', 'slide-up': 'slide-up',
                    'slide-down': 'slide-down', 'zoom': 'zoom-out'}
 MAX_PROJECT_SECONDS = 60 * 60
@@ -502,6 +508,11 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
                 clip['adjust'] = sanitize_adjust(c.get('adjust'))
             clip['anim_in'] = sanitize_anim(c.get('anim_in'))
             clip['anim_out'] = sanitize_anim(c.get('anim_out'))
+            if clip['anim_out']['type'] == 'typewriter':
+                clip['anim_out']['type'] = 'fade'
+            if clip['anim_in']['type'] == 'typewriter' and kind != 'text':
+                clip['anim_in']['type'] = 'wipe'
+            clip['loop_fx'] = c.get('loop_fx') if c.get('loop_fx') in LOOP_FX else 'none'
             clip['transition'] = sanitize_anim(c.get('transition'), TRANSITIONS)
         if kind in ('video', 'image', 'audio'):
             mid = c.get('media')
@@ -610,9 +621,10 @@ def motion_plan(project):
     return plan
 
 
-def _mask_alpha(kind, d):
-    """geq alpha expression revealing a clip during the first `d` seconds (T = local time)."""
-    p = f'clip(T/{d:.3f},0,1)'
+def _mask_alpha(kind, d, reverse=False):
+    """geq alpha expression revealing a clip over `d` seconds (T = time within the segment).
+    reverse=True hides it instead (for exit animations)."""
+    p = f'(1-clip(T/{d:.3f},0,1))' if reverse else f'clip(T/{d:.3f},0,1)'
     e = f'({p}*{p}*(3-2*{p}))'  # smoothstep
     soft = '(max(W,H)*0.03)'
 
@@ -638,9 +650,25 @@ def _mask_alpha(kind, d):
     return '1'
 
 
-def _motion_exprs(start, rdur, anim_in, anim_out):
+def _rotation_expr(static_deg, rdur, anim_in, anim_out):
+    """Angle (radians) as a function of local time t, or None if nothing turns over time."""
+    parts = []
+    if anim_in and anim_in[0] in ANIM_ROT:
+        parts.append(f'{ANIM_ROT[anim_in[0]] * 3.14159265 / 180:.5f}*pow(1-clip(t/{anim_in[1]:.3f},0,1),3)')
+    if anim_out and anim_out[0] in ANIM_ROT:
+        parts.append(f'{-ANIM_ROT[anim_out[0]] * 3.14159265 / 180:.5f}*pow(1-clip(({rdur:.3f}-t)/{anim_out[1]:.3f},0,1),3)')
+    if not parts:
+        return None
+    return '+'.join([f'{static_deg * 3.14159265 / 180:.5f}'] + parts)
+
+
+def _motion_exprs(start, rdur, anim_in, anim_out, loop_fx='none'):
     """ffmpeg expressions for (dx, dy, scale) given global time t (overlay) / local t (scale)."""
     dx, dy, sc_local = [], [], []
+    if loop_fx == 'breathe':
+        sc_local.append('(1+0.03*(0.5-0.5*cos(2*PI*t/2.4)))')
+    elif loop_fx == 'drift':
+        dy.append(f'-0.035*clip((t-{start:.3f})/{rdur:.3f},0,1)')
     if anim_in:
         mx, my, ms, _ = MOTION[anim_in[0]]
         rem = f'pow(1-clip((t-{start:.3f})/{anim_in[1]:.3f},0,1),3)'
@@ -692,7 +720,9 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
         mp = plan.get(c['id'], {'ext': 0.0, 'in': None, 'out': None})
         start, ext = c['start'], mp['ext']
         dur = c['duration'] + ext  # held longer when the next clip transitions in over it
-        needs_scale = any(a and MOTION[a[0]][2] != 1 for a in (mp['in'], mp['out']))
+        needs_scale = (any(a and MOTION[a[0]][2] != 1 for a in (mp['in'], mp['out'])) or c.get('loop_fx') == 'breathe'
+                       or any(a and a[0] in ANIM_ROT for a in (mp['in'], mp['out'])))
+        base_src = None
         text_box = None
         bw, bh = _even(c['w'] * W), _even(c['h'] * H)
         bx, by = int(round(c['x'] * W)), int(round(c['y'] * H))
@@ -708,7 +738,18 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             if not png:
                 warnings.append(f'Text "{c["text"]["content"][:30]}" was skipped (no rendered image).')
                 continue
-            idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(png))
+            if isinstance(png, dict) and png.get('seq') and png['seq_dur'] < dur - 0.05:
+                # Typewriter: a short image sequence of the text appearing, then the finished text.
+                n, sd = len(png['seq']), png['seq_dur']
+                i_seq = add_input('-framerate', f'{n / sd:.4f}', '-start_number', '0', '-i', png['pattern'])
+                idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur - sd:.3f}', '-i', str(png['full']))
+                fc.append(f'[{i_seq}:v]fps={fps},format=rgba,trim=duration={sd:.3f}[ta{k}]')
+                fc.append(f'[{idx}:v]format=rgba[tb{k}]')
+                fc.append(f'[ta{k}][tb{k}]concat=n=2:v=1:a=0[tt{k}]')
+                base_src = f'tt{k}'
+            else:
+                full = png['full'] if isinstance(png, dict) else png
+                idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(full))
             bx, by = 0, 0  # text images are full frame with the text already placed
             chain.append('format=rgba')
             if needs_scale or c.get('rotate'):  # crop to the text box (plus room for glows) so it scales/turns around itself
@@ -776,14 +817,17 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 st_ = 0 if which == 'in' else dur - d
                 chain.append(f'fade=t={which}:st={st_:.3f}:d={d:.3f}:alpha=1')
         rot = c.get('rotate', 0) or 0
+        rot_expr = _rotation_expr(rot, dur, mp['in'], mp['out'])
         split_at = len(chain)
-        dx, dy, scale = _motion_exprs(start, dur, mp['in'], mp['out'])
+        dx, dy, scale = _motion_exprs(start, dur, mp['in'], mp['out'], c.get('loop_fx', 'none'))
         ow, oh = text_box or ((bw, bh) if c['kind'] != 'text' else (W, H))
         if scale:
             pw, ph = _even(ow * 1.32), _even(oh * 1.32)
             chain.append(f"scale=w='trunc(max(2,{ow}*{scale})/2)*2':h='trunc(max(2,{oh}*{scale})/2)*2':eval=frame")
             chain.append(f'pad=w={pw}:h={ph}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame')
-        if rot:
+        if rot_expr:  # turning over time (Tumble): big enough canvas for any angle
+            chain.append(f"rotate=a='{rot_expr}':ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=none")
+        elif rot:
             ang = f'{rot * 3.141592653589793 / 180:.5f}'
             chain.append(f'rotate=a={ang}:ow=rotw({ang}):oh=roth({ang}):c=none')
         chain.append(f'setpts=PTS-STARTPTS+{start:.3f}/TB')
@@ -796,21 +840,41 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             fc.append(f'[rc{k}][rf{k}]alphamerge[rg{k}]')
             src_label, chain, split_at = f'rg{k}', post, 0
         else:
-            src_label = f'{idx}:v'
-        mask = mp.get('mask')
-        if mask and mask[1] < dur - 0.05:
-            # Only the transition's first moments go through the (slow) per-pixel mask.
-            d = mask[1]
-            fc.append(f'[{src_label}]' + (','.join(chain[:split_at]) + ',' if split_at else '') + f'split[mA{k}][mB{k}]')
-            fc.append(f"[mA{k}]trim=0:{d:.3f},setpts=PTS-STARTPTS,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-                      f"a='alpha(X,Y)*{_mask_alpha(mask[0], d)}'[mC{k}]")
-            fc.append(f'[mB{k}]trim=start={d:.3f},setpts=PTS-STARTPTS[mD{k}]')
-            fc.append(f'[mC{k}][mD{k}]concat=n=2:v=1:a=0,' + ','.join(chain[split_at:]) + f'[v{k}]')
+            src_label = base_src or f'{idx}:v'
+        # Masks: a wipe-type transition or Wipe/Baseline entrance at the start, Wipe/Baseline exit at the end.
+        head = mp.get('mask')
+        if not head and mp['in'] and mp['in'][0] in ANIM_MASK:
+            head = (ANIM_MASK[mp['in'][0]], mp['in'][1])
+        tail = (ANIM_MASK_OUT[mp['out'][0]], mp['out'][1]) if mp['out'] and mp['out'][0] in ANIM_MASK_OUT else None
+        if head and head[1] >= dur - 0.05:
+            head = None
+        if tail and tail[1] >= dur - (head[1] if head else 0) - 0.05:
+            tail = None
+        if head or tail:
+            # Only those moments go through the (slow) per-pixel mask; the rest is passed straight through.
+            cuts = [0.0] + ([head[1]] if head else []) + ([dur - tail[1]] if tail else []) + [dur]
+            segs = []
+            for i in range(len(cuts) - 1):
+                expr = None
+                if head and i == 0:
+                    expr = _mask_alpha(head[0], head[1])
+                elif tail and i == len(cuts) - 2:
+                    expr = _mask_alpha(tail[0], tail[1], reverse=True)
+                segs.append((cuts[i], cuts[i + 1], expr))
+            names = ''.join(f'[mS{k}_{i}]' for i in range(len(segs)))
+            fc.append(f'[{src_label}]' + (','.join(chain[:split_at]) + ',' if split_at else '') + f'split={len(segs)}{names}')
+            outs = ''
+            for i, (a, b, expr) in enumerate(segs):
+                g = (f",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{expr}'" if expr else '')
+                fc.append(f'[mS{k}_{i}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS{g}[mT{k}_{i}]')
+                outs += f'[mT{k}_{i}]'
+            fc.append(f'{outs}concat=n={len(segs)}:v=1:a=0,' + ','.join(chain[split_at:]) + f'[v{k}]')
         else:
             fc.append(f'[{src_label}]' + ','.join(chain) + f'[v{k}]')
         nxt = f'base{k + 1}'
-        x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (scale or rot or dx != '0') else str(bx)
-        y = f"{by}+{H}*({dy})-(h-{oh})/2" if (scale or rot or dy != '0') else str(by)
+        moving = scale or rot or rot_expr
+        x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (moving or dx != '0') else str(bx)
+        y = f"{by}+{H}*({dy})-(h-{oh})/2" if (moving or dy != '0') else str(by)
         fc.append(f"[{base}][v{k}]overlay=x='{x}':y='{y}':eof_action=pass:format=auto:"
                   f"enable='between(t,{start:.3f},{start + dur:.3f})'[{nxt}]")
         base = nxt
@@ -905,10 +969,23 @@ class ExportJobs:
         tmp = Path(tempfile.mkdtemp(prefix='kokoro-export-'))
         pngs = {}
         for cid, data in (text_images or {}).items():
-            raw = decode_png(data)
-            if raw and re.fullmatch(r'[A-Za-z0-9_-]+', str(cid)):
-                (tmp / f'{cid}.png').write_bytes(raw)
-                pngs[str(cid)] = tmp / f'{cid}.png'
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', str(cid)):
+                continue
+            full = data.get('full') if isinstance(data, dict) else data
+            raw = decode_png(full)
+            if not raw:
+                continue
+            (tmp / f'{cid}.png').write_bytes(raw)
+            entry = tmp / f'{cid}.png'
+            seq = data.get('seq') if isinstance(data, dict) else None
+            if isinstance(seq, list) and 1 < len(seq) <= 120:
+                frames = [decode_png(x) for x in seq]
+                if all(frames):
+                    for i, fr in enumerate(frames):
+                        (tmp / f'{cid}_t{i:03d}.png').write_bytes(fr)
+                    entry = {'full': tmp / f'{cid}.png', 'seq': frames, 'pattern': str(tmp / f'{cid}_t%03d.png'),
+                             'seq_dur': _num(data.get('seq_dur'), 0.1, 10, 1.0)}
+            pngs[str(cid)] = entry
         slug = re.sub(r'[^A-Za-z0-9]+', '-', project['name']).strip('-').lower()[:40] or 'video'
         name = f'{slug}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.mp4'
         out = self.dir / name

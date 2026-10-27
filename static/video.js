@@ -42,7 +42,7 @@ const TEXT_PRESETS = [
   {name: 'Quote', box: [0.12, 0.3, 0.76, 0.4], text: {content: '“Words worth remembering.”', size: 0.07, weight: 400, font: 'serif', italic: true, effect: 'shadow'}},
   {name: 'Neon sign', box: [0.1, 0.35, 0.8, 0.3], text: {content: 'Glow', size: 0.13, weight: 800, font: 'rounded', color: '#ff4fd8', effect: 'neon'}},
   {name: 'Glitch', box: [0.1, 0.35, 0.8, 0.3], text: {content: 'GLITCH', size: 0.13, weight: 900, font: 'display', effect: 'glitch'}},
-  {name: 'Scripture', box: [0.1, 0.28, 0.8, 0.44], text: {content: 'Verse text goes here.\n— Book 1:1', size: 0.06, weight: 500, font: 'serif', effect: 'lift'}},
+  {name: 'Scripture', box: [0.1, 0.28, 0.8, 0.44], text: {content: 'Verse text goes here.\n— Book 1:1', size: 0.06, weight: 500, font: 'serif', effect: 'lift'}, anim_in: {type: 'typewriter', dur: 2.5}, anim_out: {type: 'fade', dur: 0.6}},
 ];
 const SHAPE_PRESETS = [
   {name: 'Full background', color: '#1d1b18ff', box: [0, 0, 1, 1], lane: 'V1'},
@@ -54,9 +54,14 @@ const SHAPE_PRESETS = [
 ];
 
 const MOTION = {fade: [0, 0, 1, 1], rise: [0, 0.06, 1, 1], drop: [0, -0.06, 1, 1], 'slide-left': [1, 0, 1, 0],
-  'slide-right': [-1, 0, 1, 0], 'slide-up': [0, 1, 1, 0], 'slide-down': [0, -1, 1, 0], pop: [0, 0, 0.5, 0.5], 'zoom-out': [0, 0, 1.3, 1]};
+  'slide-right': [-1, 0, 1, 0], 'slide-up': [0, 1, 1, 0], 'slide-down': [0, -1, 1, 0], pop: [0, 0, 0.5, 0.5], 'zoom-out': [0, 0, 1.3, 1],
+  pan: [0.15, 0, 1, 1], wipe: [0, 0, 1, 0], baseline: [0, 0.05, 1, 0], tumble: [0, 0, 0.5, 1], typewriter: [0, 0, 1, 0]};
+const ANIM_ROT = {tumble: -75};
+const ANIM_MASK = {wipe: 'wipe-right', baseline: 'wipe-down'}, ANIM_MASK_OUT = {wipe: 'wipe-left', baseline: 'wipe-down'};
+const LOOP_FX_LABELS = {none: 'None', breathe: 'Breathe (gentle pulse)', drift: 'Drift (slow float up)'};
 const ANIM_LABELS = {none: 'None', fade: 'Fade', rise: 'Rise', drop: 'Drop', 'slide-left': 'Slide left', 'slide-right': 'Slide right',
-  'slide-up': 'Slide up', 'slide-down': 'Slide down', pop: 'Pop', 'zoom-out': 'Zoom'};
+  'slide-up': 'Slide up', 'slide-down': 'Slide down', pop: 'Pop', 'zoom-out': 'Zoom', pan: 'Pan', wipe: 'Wipe', baseline: 'Baseline',
+  tumble: 'Tumble', typewriter: 'Typewriter'};
 const TRANSITION_LABELS = {none: 'None', crossfade: 'Dissolve', dip: 'Dip to background', 'slide-left': 'Slide left', 'slide-right': 'Slide right',
   'slide-up': 'Slide up', 'slide-down': 'Slide down', 'wipe-left': 'Line wipe ←', 'wipe-right': 'Line wipe →', 'wipe-up': 'Line wipe ↑',
   'wipe-down': 'Line wipe ↓', circle: 'Circle wipe', clock: 'Clock wipe', 'split-v': 'Split open ↔', 'split-h': 'Split open ↕', zoom: 'Zoom'};
@@ -85,9 +90,12 @@ function motionPlan(p) {
 }
 /* Clip the canvas to the revealed part of a clip during a wipe-type transition (same shapes as export). */
 function applyMask(ctx, c, mp, t, W, H) {
-  if (!mp.mask) return;
-  const [kind, d] = mp.mask, p = clamp((t - c.start) / d, 0, 1);
-  if (p >= 1) return;
+  const end = c.start + c.duration + mp.ext;
+  let kind = null, p = 1;
+  const head = mp.mask || (mp.in && ANIM_MASK[mp.in[0]] ? [ANIM_MASK[mp.in[0]], mp.in[1]] : null);
+  if (head && t < c.start + head[1]) { kind = head[0]; p = clamp((t - c.start) / head[1], 0, 1); }
+  else if (mp.out && ANIM_MASK_OUT[mp.out[0]] && t > end - mp.out[1]) { kind = ANIM_MASK_OUT[mp.out[0]]; p = 1 - clamp((t - (end - mp.out[1])) / mp.out[1], 0, 1); }
+  if (!kind || p >= 1) return;
   const e = p * p * (3 - 2 * p);
   const [x, y, w, h] = c.kind === 'text' ? [0, 0, W, H] : [c.x * W, c.y * H, c.w * W, c.h * H];
   const cx = x + w / 2, cy = y + h / 2;
@@ -104,18 +112,20 @@ function applyMask(ctx, c, mp, t, W, H) {
 }
 function motionAt(c, mp, t) {
   const end = c.start + c.duration + mp.ext;
-  let dx = 0, dy = 0, sc = 1, a = 1;
+  let dx = 0, dy = 0, sc = 1, a = 1, rot = 0;
+  if (c.loop_fx === 'breathe') sc *= 1 + 0.03 * (0.5 - 0.5 * Math.cos(2 * Math.PI * (t - c.start) / 2.4));
+  else if (c.loop_fx === 'drift') dy -= 0.035 * clamp((t - c.start) / (end - c.start), 0, 1);
   if (mp.in) {
     const [mx, my, ms, share] = MOTION[mp.in[0]], rem = Math.pow(1 - clamp((t - c.start) / mp.in[1], 0, 1), 3);
-    dx += mx * rem; dy += my * rem; sc *= 1 + (ms - 1) * rem;
+    dx += mx * rem; dy += my * rem; sc *= 1 + (ms - 1) * rem; rot += (ANIM_ROT[mp.in[0]] || 0) * rem;
     if (share) a *= clamp((t - c.start) / (mp.in[1] * share), 0, 1);
   }
   if (mp.out) {
     const [mx, my, ms, share] = MOTION[mp.out[0]], rem = Math.pow(1 - clamp((end - t) / mp.out[1], 0, 1), 3);
-    dx -= mx * rem; dy -= my * rem; sc *= 1 + (ms - 1) * rem;
+    dx -= mx * rem; dy -= my * rem; sc *= 1 + (ms - 1) * rem; rot -= (ANIM_ROT[mp.out[0]] || 0) * rem;
     if (share) a *= clamp((end - t) / (mp.out[1] * share), 0, 1);
   }
-  return {dx, dy, sc, a};
+  return {dx, dy, sc, a, rot};
 }
 
 const st = {
@@ -552,14 +562,19 @@ function canvasFilter(c, W, H) {
   return parts.join(' ') || 'none';
 }
 /* Shared by preview and export: draws a text clip into a W×H frame. */
-function drawText(ctx, c, W, H) {
+function textLength(c) { return (c.text.upper ? c.text.content.toUpperCase() : c.text.content).replace(/\n/g, '').length; }
+function drawText(ctx, c, W, H, chars = null) {
   const t = c.text, fs = t.size * Math.min(W, H);  // same look in landscape and vertical
   ctx.save();
   ctx.font = `${t.italic ? 'italic ' : ''}${t.weight} ${fs}px ${FONTS[t.font] || FONTS.sans}`;
   ctx.textBaseline = 'middle';
   const bx = c.x * W, by = c.y * H, bw = c.w * W, bh = c.h * H;
   const content = t.upper ? t.content.toUpperCase() : t.content;
-  const lines = wrapLines(ctx, content, bw);
+  let lines = wrapLines(ctx, content, bw);
+  if (chars !== null) {  // Typewriter: same line layout as the finished text, cut after `chars` letters
+    let left = chars;
+    lines = lines.map(ln => { const keep = ln.slice(0, Math.max(0, left)); left -= ln.length; return keep; });
+  }
   const lh = fs * 1.22, blockH = lines.length * lh;
   let y = by + (bh - blockH) / 2 + lh / 2;
   const xFor = w => t.align === 'left' ? bx : t.align === 'right' ? bx + bw - w : bx + (bw - w) / 2;
@@ -632,7 +647,10 @@ function draw() {
     const m = motionAt(c, plan[c.id], t);
     ctx.save();
     ctx.translate(m.dx * W, m.dy * H);
-    if (m.sc !== 1) { const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H; ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.translate(-cx, -cy); }
+    if (m.sc !== 1 || m.rot) {
+      const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H;
+      ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.rotate(m.rot * Math.PI / 180); ctx.translate(-cx, -cy);
+    }
     applyMask(ctx, c, plan[c.id], t, W, H);
     {
       const bx = c.kind === 'text' ? 0 : c.x * W, by = c.kind === 'text' ? 0 : c.y * H;
@@ -649,7 +667,9 @@ function draw() {
     if (c.kind === 'color') {
       ctx.fillStyle = hexToRgba(c.color); ctx.fillRect(c.x * W, c.y * H, c.w * W, c.h * H);
     } else if (c.kind === 'text') {
-      drawText(ctx, c, W, H);
+      const mp = plan[c.id];
+      const chars = mp.in && mp.in[0] === 'typewriter' ? Math.floor(clamp((t - c.start) / mp.in[1], 0, 1) * textLength(c)) : null;
+      drawText(ctx, c, W, H, chars);
     } else {
       const el = elementFor(c);
       if (el && (c.kind === 'image' ? el.complete : el.readyState >= 2)) {
@@ -1031,8 +1051,11 @@ function renderProps() {
     html += `<h3>Animation</h3>`;
     if (prev) html += `<div class="row two">${field('Transition from previous', sel('data-trtype', TRANSITION_LABELS, tr.type))}${field('Length (s)', `<input class="input mono" type="number" step="0.1" min="0.1" max="5" value="${num(tr.dur)}" data-trdur>`)}</div>
       ${tr.type !== 'none' ? '<button type="button" class="link-btn ve-small" data-act="trall">Use this transition for every scene change on this track</button>' : ''}`;
-    html += `<div class="row two">${field('Entrance', sel('data-anim="anim_in"', ANIM_LABELS, ai.type))}${field('Length (s)', `<input class="input mono" type="number" step="0.1" min="0.1" max="5" value="${num(ai.dur)}" data-animdur="anim_in">`)}</div>
-      <div class="row two">${field('Exit', sel('data-anim="anim_out"', ANIM_LABELS, ao.type))}${field('Length (s)', `<input class="input mono" type="number" step="0.1" min="0.1" max="5" value="${num(ao.dur)}" data-animdur="anim_out">`)}</div>
+    const inLabels = Object.fromEntries(Object.entries(ANIM_LABELS).filter(([k]) => k !== 'typewriter' || c.kind === 'text'));
+    const outLabels = Object.fromEntries(Object.entries(ANIM_LABELS).filter(([k]) => k !== 'typewriter'));
+    html += `<div class="row two">${field('Entrance', sel('data-anim="anim_in"', inLabels, ai.type))}${field('Length (s)', `<input class="input mono" type="number" step="0.1" min="0.1" max="5" value="${num(ai.dur)}" data-animdur="anim_in">`)}</div>
+      <div class="row two">${field('Exit', sel('data-anim="anim_out"', outLabels, ao.type))}${field('Length (s)', `<input class="input mono" type="number" step="0.1" min="0.1" max="5" value="${num(ao.dur)}" data-animdur="anim_out">`)}</div>
+      ${field('While on screen', sel('data-loopfx', LOOP_FX_LABELS, c.loop_fx || 'none'))}
       <button type="button" class="btn ghost wide" data-act="preview-anim">Preview animation</button>`;
   }
   html += `<h3>Fades</h3><div class="row two">${field('Fade in (s)', `<input class="input mono" type="number" step="0.1" min="0" max="10" data-k="fade_in">`)}${field('Fade out (s)', `<input class="input mono" type="number" step="0.1" min="0" max="10" data-k="fade_out">`)}</div>`;
@@ -1120,6 +1143,7 @@ function bindProps(c) {
   box.querySelectorAll('[data-fit]').forEach(el => el.onclick = () => commit(() => { c.fit = el.dataset.fit; }));
   box.querySelector('[data-trtype]')?.addEventListener('change', e => commit(() => { c.transition = {type: e.target.value, dur: c.transition?.dur || 0.6}; }));
   box.querySelector('[data-trdur]')?.addEventListener('change', e => commit(() => { c.transition = {type: c.transition?.type || 'crossfade', dur: clamp(+e.target.value || 0.6, 0.1, 5)}; }));
+  box.querySelector('[data-loopfx]')?.addEventListener('change', e => commit(() => { c.loop_fx = e.target.value; }));
   box.querySelectorAll('[data-anim]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.anim; c[k] = {type: el.value, dur: c[k]?.dur || 0.6}; })));
   box.querySelectorAll('[data-animdur]').forEach(el => el.addEventListener('change', () => commit(() => { const k = el.dataset.animdur; c[k] = {type: c[k]?.type || 'fade', dur: clamp(+el.value || 0.6, 0.1, 5)}; })));
   box.querySelector('[data-lane]')?.addEventListener('change', e => commit(() => { c.lane = e.target.value; }));
@@ -1391,9 +1415,19 @@ function renderTextImages() {
   const out = {}, W = P().width, H = P().height;
   const off = document.createElement('canvas'); off.width = W; off.height = H;
   const ctx = off.getContext('2d');
+  const plan = motionPlan(P());
   for (const c of P().clips.filter(c => c.kind === 'text')) {
     ctx.clearRect(0, 0, W, H); drawText(ctx, c, W, H);
-    out[c.id] = off.toDataURL('image/png');
+    const full = off.toDataURL('image/png');
+    const mp = plan[c.id];
+    if (mp?.in && mp.in[0] === 'typewriter') {
+      const n = textLength(c), steps = Math.max(2, Math.min(60, n)), seq = [];
+      for (let i = 0; i < steps; i++) {
+        ctx.clearRect(0, 0, W, H); drawText(ctx, c, W, H, Math.floor(i / steps * n));
+        seq.push(off.toDataURL('image/png'));
+      }
+      out[c.id] = {full, seq, seq_dur: mp.in[1]};
+    } else out[c.id] = full;
   }
   return out;
 }

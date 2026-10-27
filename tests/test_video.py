@@ -293,3 +293,26 @@ def test_adjustments_rotation_rounding_export(tmp_path, assets):
             break
         time.sleep(0.1)
     assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])
+
+
+def test_canva_animations_export(tmp_path, assets):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    photo = lib.add((assets / 'photo.png').read_bytes(), 'photo.png')
+    png = 'data:image/png;base64,' + base64.b64encode((assets / 'text.png').read_bytes()).decode()
+    clips = [{'id': f'a{i}', 'kind': 'image', 'media': photo['id'], 'start': i, 'duration': 1, 'lane': 'V2',
+              'anim_in': {'type': a, 'dur': 0.3}, 'anim_out': {'type': a, 'dur': 0.3}, 'loop_fx': fx}
+             for i, (a, fx) in enumerate([('wipe', 'breathe'), ('baseline', 'drift'), ('tumble', 'none'), ('pan', 'breathe')])]
+    clips.append({'id': 'tw', 'kind': 'text', 'text': {'content': 'Hello there'}, 'start': 0, 'duration': 2,
+                  'anim_in': {'type': 'typewriter', 'dur': 1}})
+    clips.append({'id': 'bad', 'kind': 'image', 'media': photo['id'], 'start': 0, 'duration': 1, 'anim_in': {'type': 'typewriter'}})
+    p = vid.sanitize_project({'fps': 15, 'clips': clips}, lib)
+    assert p['clips'][-1]['anim_in']['type'] == 'wipe'          # typewriter is for text only
+    assert vid._rotation_expr(0, 1, ('tumble', 0.3), None) and vid._rotation_expr(10, 1, ('fade', 0.3), None) is None
+    p['width'], p['height'] = 192, 108
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(p, lambda m: (lib.path(m), False), {'tw': {'full': png, 'seq': [png] * 6, 'seq_dur': 1.0}}, quality='small')
+    for _ in range(600):
+        if jobs.get(job['id'])['status'] != 'running':
+            break
+        time.sleep(0.1)
+    assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])
