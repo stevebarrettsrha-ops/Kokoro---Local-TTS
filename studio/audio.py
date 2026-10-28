@@ -146,12 +146,29 @@ def loudness(y, sr):
     return float(-0.691 + 10 * np.log10(keep.mean()))
 
 
+_CHUNK = 1 << 19   # samples per block for oversampled peak detection (keeps memory flat on long takes)
+_CONTEXT = 64      # extra samples either side so block edges match a whole-signal pass
+
+
+def _peak_env(y):
+    """Per-sample peak of |y| and its 4x-oversampled reconstruction (true peak), computed block-wise."""
+    y = np.asarray(y, dtype=np.float64)
+    env = np.empty(len(y), dtype=np.float64)
+    for a in range(0, len(y), _CHUNK):
+        b = min(len(y), a + _CHUNK)
+        lo, hi = max(0, a - _CONTEXT), min(len(y), b + _CONTEXT)
+        up = np.abs(signal.resample_poly(y[lo:hi], 4, 1))
+        n = hi - lo
+        per = up[: n * 4].reshape(n, 4).max(axis=1)[a - lo: a - lo + (b - a)]
+        env[a:b] = np.maximum(per, np.abs(y[a:b]))
+    return env
+
+
 def true_peak_db(y):
     y = np.asarray(y, dtype=np.float64)
     if y.size == 0:
         return float('-inf')
-    up = signal.resample_poly(y, 4, 1)
-    peak = max(np.abs(up).max(), np.abs(y).max())
+    peak = float(_peak_env(y).max())
     return float(20 * np.log10(peak)) if peak > 0 else float('-inf')
 
 
@@ -159,19 +176,21 @@ def limit(y, sr, ceiling_db=-1.0):
     """Look-ahead true-peak limiter (4x oversampled detection)."""
     y = np.asarray(y, dtype=np.float64)
     ceiling = db_to_amp(ceiling_db)
+    if y.size == 0:
+        return y.astype(np.float32)
     for _ in range(3):
-        up = np.abs(signal.resample_poly(y, 4, 1))
-        env = np.maximum(up[: len(y) * 4].reshape(-1, 4).max(axis=1)[: len(y)], np.abs(y))
+        env = _peak_env(y)
         if env.max() <= ceiling:
             break
         need = np.minimum(1.0, ceiling / np.maximum(env, 1e-12)) * 0.995
+        del env
         win = max(3, int(sr * 0.004)) | 1
-        g = minimum_filter1d(need, win)
-        g = uniform_filter1d(g, win)
+        g = uniform_filter1d(minimum_filter1d(need, win), win)
         # Slower recovery so the limiter doesn't pump on every syllable.
         rel = int(sr * 0.06) | 1
         g = np.minimum(g, uniform_filter1d(minimum_filter1d(need, rel), rel))
-        y = y * g
+        del need
+        y *= g
     return np.clip(y, -ceiling, ceiling).astype(np.float32)
 
 

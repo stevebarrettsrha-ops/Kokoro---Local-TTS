@@ -5,3 +5,4 @@ numpy>=1.26,<3
 scipy>=1.11,<2
 librosa>=0.10.2,<1
 huggingface_hub>=0.28,<2
+spacy>=3.7,<3.9  # repair-spacy.sh knows the matching English model for these
