@@ -119,7 +119,8 @@ def test_real_export(tmp_path, assets):
     v = next(s for s in info['streams'] if s['codec_type'] == 'video')
     assert (v['width'], v['height']) == (320, 180)
     assert [e['file'] for e in jobs.exports()] == [done['file']]
-    assert not list((tmp_path / 'exports').glob('.*'))  # no partial files left
+    assert not list((tmp_path / 'exports').glob('.*.part.mp4'))  # no partial files left
+    assert [f.name for f in (tmp_path / 'exports' / '.jobs' / done['id']).iterdir()] == ['job.json']  # request files dropped
 
 
 def test_export_guards(tmp_path):
@@ -202,9 +203,13 @@ def test_stale_files_are_cleaned_on_start(tmp_path):
     (tmp_path / 'media' / '.upload-abc').write_bytes(b'x')
     (tmp_path / 'exports').mkdir()
     (tmp_path / 'exports' / '.video-1.mp4.part.mp4').write_bytes(b'x')
-    vid.MediaLibrary(tmp_path / 'media')
-    vid.ExportJobs(tmp_path / 'exports')
-    assert not list((tmp_path / 'media').iterdir()) and not list((tmp_path / 'exports').iterdir())
+    lib, jobs = vid.MediaLibrary(tmp_path / 'media'), vid.ExportJobs(tmp_path / 'exports')
+    # Opening the folders changes nothing (a second studio started by mistake must not
+    # break a running export); recover() tidies up once the studio owns the port.
+    assert (tmp_path / 'media' / '.upload-abc').exists() and (tmp_path / 'exports' / '.video-1.mp4.part.mp4').exists()
+    lib.recover()
+    jobs.recover(lambda mid: (None, False))
+    assert not list((tmp_path / 'media').iterdir()) and not list((tmp_path / 'exports').glob('*.mp4'))
 
 
 def test_second_export_is_refused_and_bad_build_frees_the_slot(tmp_path, assets):
@@ -239,3 +244,37 @@ def test_upload_route_reports_every_bad_file(tmp_path, monkeypatch):
     r = server.app.test_client().post('/api/media', data={'files': [(io.BytesIO(b'x' * 10), 'a.mp4'), (io.BytesIO(b'y'), 'b.txt')]})
     body = r.get_json()
     assert r.status_code == 400 and len(body['errors']) == 2 and 'a.mp4' in body['errors'][0]
+
+
+def test_interrupted_export_resumes_after_restart(tmp_path, assets, monkeypatch):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    pic = lib.add((assets / 'photo.png').read_bytes(), 'p.png')
+    text = {'kind': 'text', 'id': 'cap1', 'start': 0, 'duration': 1, 'x': 0.1, 'y': 0.7, 'w': 0.8, 'h': 0.2,
+            'text': {'content': 'hi', 'size': 0.05}}
+    project = vid.sanitize_project({'name': 'Resume me', 'clips': [{'kind': 'image', 'media': pic['id'], 'duration': 1}, text]}, lib)
+    png = 'data:image/png;base64,' + base64.b64encode((assets / 'text.png').read_bytes()).decode()
+    resolve = lambda mid: (lib.path(mid), False)
+    # The studio stops right after the export was accepted: its thread never runs.
+    with monkeypatch.context() as m:
+        m.setattr(vid.threading, 'Thread', lambda *a, **k: type('T', (), {'start': lambda self: None})())
+        first = vid.ExportJobs(tmp_path / 'exports').start(project, resolve, {'cap1': {'png': png, 'x': 192, 'y': 720}})
+    again = vid.ExportJobs(tmp_path / 'exports')  # restart
+    assert [j['id'] for j in again.active(project['id'])] == [first['id']]
+    assert again.recover(resolve) == [first['id']]
+    end = time.time() + 60
+    while again.get(first['id'])['status'] == 'running' and time.time() < end:
+        time.sleep(0.2)
+    job = again.get(first['id'])
+    assert job['status'] == 'done' and job['resumed'] and again.export_path(job['file'])
+    assert not again.active()
+    assert vid.ExportJobs(tmp_path / 'exports').get(first['id'])['status'] == 'done'  # outcome survives too
+
+
+def test_cropped_text_images_are_placed_by_offset(tmp_path):
+    project = vid.sanitize_project({'clips': [{'kind': 'text', 'id': 't', 'start': 0, 'duration': 1, 'x': 0.3, 'y': 0.4, 'w': 0.4, 'h': 0.2,
+                                               'text': {'content': 'x'}}]})
+    args, _, warnings = vid.build_command(project, lambda m: (None, False),
+                                          {'t': {'path': tmp_path / 't.png', 'x': 500, 'y': 300, 'w': 900, 'h': 400}}, tmp_path / 'o.mp4')
+    graph = args[args.index('-filter_complex') + 1]
+    assert "overlay=x='500':y='300'" in graph and 'crop=' not in graph and not warnings
+    assert '-loop' not in args  # stills are decoded once, not once per frame

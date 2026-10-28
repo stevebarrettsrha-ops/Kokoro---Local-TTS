@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from studio.engine import Engine
+from studio.engine import bounded as engine_bounded
 from studio import video as vid
 
 HERE = Path(__file__).resolve().parent
@@ -198,21 +199,51 @@ def captions(rid, ext):
                      as_attachment=True, download_name=_download_name(rid, ext))
 
 
-@app.get('/api/recordings')
-def recordings():
-    data = []
+_take_cache = {}  # path -> (mtime, entry): re-reading thousands of take files on every call is slow
+SUMMARY_KEYS = ('id', 'name', 'voice', 'style', 'seconds', 'rate', 'created', 'mp3', 'captions', 'lufs', 'true_peak')
+
+
+def _all_takes():
+    takes, seen = [], set()
     for filename in OUT.glob('*.json'):
+        seen.add(filename)
         try:
-            entry = json.loads(filename.read_text(encoding='utf-8'))
-            if not ID_RE.fullmatch(entry.get('id', '')) or not (OUT / (entry['id'] + '.wav')).is_file():
-                continue
-            entry.setdefault('mp3', False)
-            entry.setdefault('captions', 0)
-            data.append(_links(entry))
+            mtime = filename.stat().st_mtime
+            cached = _take_cache.get(filename)
+            if cached and cached[0] == mtime:
+                entry = cached[1]
+            else:
+                entry = json.loads(filename.read_text(encoding='utf-8'))
+                if not isinstance(entry, dict) or not ID_RE.fullmatch(entry.get('id', '')):
+                    continue
+                entry.setdefault('mp3', False)
+                entry.setdefault('captions', 0)
+                _take_cache[filename] = (mtime, entry)
+            if (OUT / (entry['id'] + '.wav')).is_file():
+                takes.append(entry)
         except (OSError, ValueError, TypeError, KeyError):
             continue
-    data.sort(key=lambda r: r.get('created', ''), reverse=True)
-    return jsonify({'recordings': data[:200]})
+    for gone in set(_take_cache) - seen:
+        _take_cache.pop(gone, None)
+    takes.sort(key=lambda r: r.get('created', ''), reverse=True)
+    return takes
+
+
+@app.get('/api/recordings')
+def recordings():
+    """Takes, newest first. ?summary=1 lists every take without scripts (for the video editor);
+    otherwise pages of full takes: ?offset=0&limit=50."""
+    takes = _all_takes()
+    if request.args.get('summary') == '1':
+        def summary(t):
+            segs = [{k: g.get(k) for k in ('start', 'end', 'style')} for g in t.get('segments') or [] if isinstance(g, dict)]
+            return _links({**{k: t.get(k) for k in SUMMARY_KEYS}, 'segments': segs})
+        return jsonify({'recordings': [summary(t) for t in takes], 'total': len(takes)})
+    offset = int(engine_bounded(request.args.get('offset'), 0, 1e9, 0))
+    limit = int(engine_bounded(request.args.get('limit'), 1, 500, 200))
+    page = takes[offset:offset + limit]
+    return jsonify({'recordings': [_links(dict(t)) for t in page], 'total': len(takes), 'offset': offset,
+                    'more': offset + len(page) < len(takes)})
 
 
 @app.post('/api/voices/clone')
@@ -411,6 +442,12 @@ def project_export(pid):
     return jsonify({'job': job})
 
 
+@app.get('/api/video/jobs')
+def job_list():
+    """Running exports, optionally for one project: the editor reattaches to them after a reload."""
+    return jsonify({'jobs': exports.active(request.args.get('project') or None)})
+
+
 @app.get('/api/video/jobs/<jid>')
 def job_status(jid):
     job = exports.get(jid)
@@ -445,9 +482,27 @@ def export_delete(name):
     return jsonify({'ok': True})
 
 
+def recover():
+    """Tidy up after the previous run and restart an export it didn't finish."""
+    media.recover()
+    for jid in exports.recover(_resolve_media):
+        print(f'Restarting an interrupted video export ({jid[:8]}).', flush=True)
+
+
 if __name__ == '__main__':
-    from werkzeug.serving import run_simple
+    from werkzeug.serving import make_server
     port = int(os.environ.get('KOKORO_PORT', '8765'))
+    # Bind first: if the studio is already running, say so and leave its files alone.
+    try:
+        server = make_server('127.0.0.1', port, app, threaded=True)  # loopback only: never exposed to the LAN
+    except (OSError, SystemExit) as exc:  # werkzeug reports a busy port as SystemExit
+        print(f'\nPort {port} is already in use.\n'
+              f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
+              f'Or start it on another port: KOKORO_PORT={port + 1} ./start.sh\n', flush=True)
+        raise SystemExit(1)
+    recover()
     print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
-    # Bind only to loopback: the app never exposes an API to the LAN.
-    run_simple('127.0.0.1', port, app, threaded=True, use_reloader=False)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

@@ -124,7 +124,7 @@ function clipName(c) {
 }
 
 async function loadLibrary() {
-  const [m, r] = await Promise.all([api('/api/media'), api('/api/recordings')]);
+  const [m, r] = await Promise.all([api('/api/media'), api('/api/recordings?summary=1')]);
   st.media = Object.fromEntries(m.media.map(x => [x.id, x]));
   st.takes = Object.fromEntries(r.recordings.map(x => [x.id, x]));
   renderBin();
@@ -1114,6 +1114,19 @@ $('#veRecordDialog').addEventListener('close', () => {
 });
 function renderAll() { renderTimeline(); renderProps(); }
 
+// After a page reload (or opening the project again), pick up an export that is still running.
+async function reattachExport() {
+  if (st.job || !P()) return;
+  const jobs = (await api(`/api/video/jobs?project=${P().id}`).catch(() => ({jobs: []}))).jobs;
+  if (!jobs.length || st.job) return;
+  st.job = jobs[0].id; st.jobFails = 0;
+  $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExGo').disabled = true;
+  $('#veExResult').innerHTML = ''; $('#veExMsg').className = 'msg';
+  $('#veExMsg').textContent = jobs[0].resumed ? 'The studio restarted; the export started again.' : 'Exporting…';
+  K.toast('An export of this video is still running. Open Export MP4 to follow it.');
+  pollJob();
+}
+
 /* ---------------------------------------------------------------- projects dialog */
 $('#veOpen').onclick = () => openProjectsDialog().catch(err => K.toast('Could not list projects: ' + err.message));
 async function openProjectsDialog() {
@@ -1151,13 +1164,29 @@ async function openProjectsDialog() {
 }
 
 /* ---------------------------------------------------------------- export */
-function renderTextImages() {
+// Same box as text_area() in studio/video.py: the text plus room for glows and shadows.
+function textArea(c, W, H) {
+  const even = n => { n = Math.max(2, Math.round(n)); return n + (n % 2); };
+  const m = Math.trunc(c.text.size * Math.min(W, H) + 0.25 * even(c.h * H));
+  const x0 = Math.max(0, Math.trunc(c.x * W) - m), y0 = Math.max(0, Math.trunc(c.y * H) - m);
+  const x1 = Math.min(W, Math.trunc((c.x + c.w) * W) + m), y1 = Math.min(H, Math.trunc((c.y + c.h) * H) + m);
+  return [x0, y0, Math.max(2, Math.floor((x1 - x0) / 2) * 2), Math.max(2, Math.floor((y1 - y0) / 2) * 2)];
+}
+// One small PNG per text clip, cropped to its area. Full-frame images made exports with
+// hundreds of captions slow and memory-hungry. Yields to the page so it stays responsive.
+async function renderTextImages(progress) {
   const out = {}, W = P().width, H = P().height;
   const off = document.createElement('canvas'); off.width = W; off.height = H;
   const ctx = off.getContext('2d');
-  for (const c of P().clips.filter(c => c.kind === 'text')) {
+  const crop = document.createElement('canvas'), cctx = crop.getContext('2d');
+  const texts = P().clips.filter(c => c.kind === 'text');
+  for (const [i, c] of texts.entries()) {
     ctx.clearRect(0, 0, W, H); drawText(ctx, c, W, H);
-    out[c.id] = off.toDataURL('image/png');
+    const [x, y, w, h] = textArea(c, W, H);
+    crop.width = w; crop.height = h;
+    cctx.clearRect(0, 0, w, h); cctx.drawImage(off, x, y, w, h, 0, 0, w, h);
+    out[c.id] = {png: crop.toDataURL('image/png'), x, y};
+    if (i % 20 === 19) { progress?.(i + 1, texts.length); await new Promise(r => setTimeout(r)); }
   }
   return out;
 }
@@ -1178,7 +1207,8 @@ $('#veExportForm').addEventListener('submit', async e => {
   $('#veExGo').disabled = true; $('#veExMsg').className = 'msg'; $('#veExMsg').textContent = 'Preparing…';
   try {
     await document.fonts?.ready;
-    const body = {project: P(), text_images: renderTextImages(), quality: form.get('quality'), lufs: form.get('lufs')};
+    const textImages = await renderTextImages((n, total) => { $('#veExMsg').textContent = `Preparing text ${n} of ${total}…`; });
+    const body = {project: P(), text_images: textImages, quality: form.get('quality'), lufs: form.get('lufs')};
     const r = await jsonPost(`/api/video/projects/${P().id}/export`, body);
     st.job = r.job.id; st.jobFails = 0; st.dirty = false; $('#veSaved').textContent = 'Saved';
     $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExMsg').textContent = 'Exporting…';
@@ -1192,12 +1222,21 @@ $('#veExCancel').onclick = async () => {
 async function pollJob() {
   if (!st.job) return;
   let job;
-  try { job = (await api(`/api/video/jobs/${st.job}`)).job; st.jobFails = 0; } catch {
-    // The job list lives in memory, so after an engine restart the export is gone for good.
-    if (++st.jobFails < 8) { setTimeout(pollJob, 1000); return; }
+  try {
+    job = (await api(`/api/video/jobs/${st.job}`)).job;
+    if (st.jobFails && job.status === 'running') $('#veExMsg').textContent = job.resumed ? 'The studio restarted; the export started again.' : 'Exporting…';
+    st.jobFails = 0;
+  } catch (err) {
+    // While the studio restarts it doesn't answer; the export then starts again by itself.
+    const gone = err.status === 404;
+    if (!gone && ++st.jobFails < 180) {
+      if (st.jobFails === 3) $('#veExMsg').textContent = 'The studio is not answering. If it was restarted, the export continues once it is back…';
+      setTimeout(pollJob, 1000); return;
+    }
     st.job = null; $('#veExCancel').hidden = true; $('#veExGo').disabled = false;
     $('#veExMsg').className = 'msg error';
-    $('#veExMsg').textContent = 'Lost contact with the export (was the studio restarted?). Check Projects → exports, or export again.';
+    $('#veExMsg').textContent = gone ? 'That export is no longer known to the studio. Check Projects → exports, or export again.'
+      : 'Lost contact with the studio. Start it with ./start.sh; an unfinished export will start again by itself.';
     return;
   }
   const pct = Math.round(job.progress * 100);
@@ -1205,6 +1244,9 @@ async function pollJob() {
   if (job.status === 'running') { setTimeout(pollJob, 600); return; }
   st.job = null; $('#veExCancel').hidden = true; $('#veExGo').disabled = false;
   const m = $('#veExMsg');
+  if (!$('#veExportDialog').open && job.status !== 'cancelled') {
+    K.toast(job.status === 'done' ? `Export finished: ${job.file} (in Projects & exports).` : 'Export failed: ' + (job.error || 'unknown error'));
+  }
   if (job.status === 'done') {
     const url = `/api/video/exports/${encodeURIComponent(job.file)}`;
     m.className = 'msg ok'; m.textContent = 'Done.' + (job.warnings.length ? ' ' + job.warnings.join(' ') : '');
@@ -1228,6 +1270,7 @@ function init() {
       if (!last) last = (await api('/api/video/projects')).projects[0]?.id || null;  // reopen the latest work
       await openProject(last);
       st.ready = true;
+      reattachExport();
       if (Object.values(st.media).some(m => m.proxy === 'pending')) pollProxies();
     } catch (err) { booting = null; K.toast('Video editor: ' + err.message); throw err; }
   })();
