@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export HF_HOME="$PWD/data/huggingface"
 export HF_HUB_OFFLINE=0
-if [ ! -x .venv/bin/python ]; then
-  echo 'First run ./start.sh to install the Python dependencies, then stop it.' >&2
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c 'import kokoro, huggingface_hub' >/dev/null 2>&1; then
+  echo 'First run ./start.sh so it can finish installing the Python dependencies, then run this again.' >&2
   exit 1
 fi
 .venv/bin/python - <<'PY'
@@ -15,4 +15,4 @@ snapshot_download(repo_id='hexgrad/Kokoro-82M', allow_patterns=['config.json', '
 print('Model assets downloaded. You can now start the app with OFFLINE=1 ./start.sh')
 PY
 # G2P uses spaCy English model if installed. Make it available for air-gapped use.
-./repair-spacy.sh
+bash ./repair-spacy.sh

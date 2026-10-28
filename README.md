@@ -46,7 +46,7 @@ This replaces the old approach of pitch-shifting finished audio, which smeared t
    uv python install 3.12
    ```
 
-   `ffmpeg` is optional and only needed for MP3 export.
+   `ffmpeg` is needed for the Video tab, MP3 export and some recording formats (M4A, and the WebM made by "Record yourself").
 
 3. Start the studio:
 
@@ -60,11 +60,17 @@ Python packages install into a folder-local `.venv`. If an existing `.venv` uses
 
 ### Offline use
 
-While online, run `./start.sh` once, stop it, then run `./download-models.sh`. After that, start with `OFFLINE=1 ./start.sh`.
+While online, run `./start.sh` once so it installs everything, then run `./download-models.sh`. If you want cloned voices offline too, also run `./setup-cloning.sh` while online. After that, start with `OFFLINE=1 ./start.sh`.
 
 ### GPU
 
-Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar shows the device. Install a CUDA build of PyTorch into `.venv` following [pytorch.org](https://pytorch.org/get-started/locally/) if it shows CPU. Force CPU with `KOKORO_DEVICE=cpu ./start.sh`. US and UK voices now share one model in memory.
+Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar shows the device. If it shows CPU, install a CUDA build of PyTorch into `.venv`. Take the index URL from [pytorch.org](https://pytorch.org/get-started/locally/), for example:
+
+```bash
+uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+(System `pip` won't work here: Ubuntu blocks it, and `.venv` may not have its own pip.) Force CPU with `KOKORO_DEVICE=cpu ./start.sh`. US and UK voices now share one model in memory.
 
 ## Video editor
 
@@ -191,7 +197,7 @@ Your current draft and theme are kept in this browser's local storage so a refre
 - `studio/cloning.py`, `cloning/chatterbox_worker.py`, `setup-cloning.sh`: cloned voices (Chatterbox in its own environment)
 - `studio/video.py`: media library, video projects, transitions/animation plan, ffmpeg export
 - `static/`: the web UI (`video.js` and `video.css` hold the editor)
-- `tests/`: `pip install -r requirements-dev.txt && pytest -q`. The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
+- `tests/`: `uv pip install --python .venv/bin/python -r requirements-dev.txt && .venv/bin/python -m pytest -q`. The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
 
 ## Limits
 
@@ -201,12 +207,15 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 
 - **Updated to a new version and it wants to download everything again**: the new files probably landed in a different folder from your old install. From the new folder, run `./move-old-setup.sh /path/to/old/folder` to move your Python environment, downloaded models, takes, voices and videos across, then run `./start.sh`.
 - **`Permission denied` when running a script**: run `chmod +x *.sh` once, or start with `bash start.sh`.
+- **Old `.venv-incompatible-*` folders**: backups made when an old Python environment was replaced. Once the studio runs, you can delete them to free several GB.
+- **Cloned voices fail with "no kernel image" or run out of GPU memory**: cloning pins its own older PyTorch, which may not support the newest GPUs. Run it on the CPU with `CHATTERBOX_DEVICE=cpu ./start.sh` (slower, but it works).
 
 - **Engine not running**: start `./start.sh` and reload the page.
 - **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh`, then `./start.sh`.
 - **`Requires-Python >=3.10,<3.13`**: install Python 3.12 with `uv` as above and rerun `./start.sh`.
 - **MP3 option greyed out**: install `ffmpeg`.
 - **Port in use**: `KOKORO_PORT=8899 ./start.sh`.
+- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
 
 ## Privacy
 

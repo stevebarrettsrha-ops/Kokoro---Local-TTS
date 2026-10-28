@@ -4,9 +4,12 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export PATH="$HOME/.local/bin:$PATH"  # uv installed in the user binary directory
 
+# OFFLINE=1 (or true/yes) uses only what is already downloaded.
+case "${OFFLINE:-0}" in 1|true|yes|TRUE|YES) OFFLINE=1 ;; *) OFFLINE=0 ;; esac
+export OFFLINE
 export HF_HOME="$PWD/data/huggingface"
-export HF_HUB_OFFLINE="${OFFLINE:-0}"
-export HF_DATASETS_OFFLINE="${OFFLINE:-0}"
+export HF_HUB_OFFLINE="$OFFLINE"
+export HF_DATASETS_OFFLINE="$OFFLINE"
 mkdir -p "$HF_HOME" outputs
 
 if ! command -v espeak-ng >/dev/null 2>&1; then
@@ -94,7 +97,7 @@ fi
 
 # Verify the English G2P model before the server starts, not during the
 # first synthesis request (which otherwise fails with a browser NetworkError).
-./repair-spacy.sh
+bash ./repair-spacy.sh  # 'bash' so it runs even if the zip lost the executable bits
 
 echo "Python: $(.venv/bin/python --version 2>&1)"
 PORT="${KOKORO_PORT:-8765}"

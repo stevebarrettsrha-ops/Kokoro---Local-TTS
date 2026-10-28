@@ -379,3 +379,13 @@ def test_cross_site_writes_are_blocked(engine, tmp_path, monkeypatch):
 def test_voice_tag_matches_names_with_spaces():
     items, warnings = parse_script('Hi there everyone. [voice=my-dad] Hello there, kids.', {**VOICE_NAMES, 'clone:my-dad-1a2b': 'My Dad'})
     assert [i['voice'] for i in items if i['kind'] == 'speech'] == [None, 'clone:my-dad-1a2b'] and not warnings
+
+
+def test_blockwise_true_peak_matches_whole_signal():
+    # Long takes are processed in blocks to keep memory flat; results must not change at block edges.
+    from scipy import signal
+    y = np.random.default_rng(3).standard_normal(fx._CHUNK * 2 + 777) * 0.3
+    up = np.abs(signal.resample_poly(y, 4, 1))
+    whole = np.maximum(up[: len(y) * 4].reshape(-1, 4).max(axis=1), np.abs(y))
+    assert np.array_equal(fx._peak_env(y), whole)
+    assert fx.true_peak_db(fx.limit(y, 48000, -1.0)) <= -0.99
