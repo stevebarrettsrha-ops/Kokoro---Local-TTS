@@ -98,7 +98,7 @@ function motionAt(c, mp, t) {
 
 const st = {
   project: null, sel: null, time: 0, playing: false, pps: 60, snap: true,
-  undo: [], redo: [], media: {}, takes: {}, els: {}, imgs: {}, saveTimer: 0, saving: false, dirty: false,
+  undo: [], redo: [], media: {}, takes: {}, els: {}, imgs: {}, saveTimer: 0, saving: null, jobFails: 0, dirty: false,
   clock0: 0, time0: 0, raf: 0, ready: false, shown: false, job: null,
 };
 
@@ -135,7 +135,9 @@ async function openProject(id) {
   let project = null;
   if (id) { try { project = (await api(`/api/video/projects/${id}`)).project; } catch { project = null; } }
   if (!project) project = (await jsonPost('/api/video/projects', {name: 'Untitled video', format: '16:9'})).project;
-  st.project = project; st.sel = null; st.time = 0; st.undo = []; st.redo = [];
+  clearTimeout(st.saveTimer);
+  st.project = project; st.sel = null; st.time = 0; st.undo = []; st.redo = []; st.dirty = false;
+  $('#veSaved').textContent = '';
   store.set('ve-last', project.id);
   resetElements();
   syncTop(); layoutStage(); renderAll();
@@ -159,22 +161,36 @@ function scheduleSave() {
   st.dirty = true; $('#veSaved').textContent = 'Unsaved changes';
   clearTimeout(st.saveTimer); st.saveTimer = setTimeout(save, 700);
 }
+// Resolves true once the current project is on disk. Callers that switch
+// projects await it, so it waits for a save already in flight and then saves
+// the latest state rather than returning early.
 async function save() {
-  if (!P()) return;
   clearTimeout(st.saveTimer);
-  if (st.saving) { st.saveTimer = setTimeout(save, 400); return; }
-  st.saving = true; $('#veSaved').textContent = 'Saving…';
-  try {
-    const sent = snapshot();
-    const r = await jsonPost(`/api/video/projects/${P().id}`, P(), 'PUT');
-    // Keep local edits made while saving; adopt server clean-ups otherwise.
-    if (snapshot() === sent) {
-      const before = P().clips.length; st.project = r.project;
-      if (r.project.clips.length !== before) { renderAll(); K.toast('Some clips referred to deleted media and were removed.'); }
-    }
-    st.dirty = false; $('#veSaved').textContent = 'Saved';
-  } catch (err) { $('#veSaved').textContent = 'Not saved: ' + err.message; }
-  finally { st.saving = false; }
+  while (st.saving) await st.saving;
+  if (!P()) return true;
+  let ok = false;
+  const project = P(), sent = snapshot();
+  $('#veSaved').textContent = 'Saving…';
+  st.saving = (async () => {
+    try {
+      const r = await jsonPost(`/api/video/projects/${project.id}`, project, 'PUT');
+      ok = true;
+      if (P() !== project || snapshot() !== sent) return;  // edited meanwhile: the scheduled save follows
+      st.dirty = false; $('#veSaved').textContent = 'Saved';
+      // Adopt the server copy only when it dropped clips (media deleted elsewhere). Replacing it on
+      // every save would leave the open properties panel editing clip objects that are no longer saved.
+      if (r.project.clips.length !== project.clips.length) {
+        st.project = r.project; renderAll(); K.toast('Some clips referred to deleted media and were removed.');
+      }
+    } catch (err) { $('#veSaved').textContent = 'Not saved: ' + err.message; }
+  })();
+  try { await st.saving; } finally { st.saving = null; }
+  return ok;
+}
+// Before leaving the current project: save, and if that fails let the user decide.
+async function saveBeforeLeaving() {
+  if (!st.dirty || await save()) return true;
+  return confirm('Your latest changes to this video could not be saved. Continue anyway and lose them?');
 }
 
 /* ---------------------------------------------------------------- adding */
@@ -332,7 +348,8 @@ let proxyTimer = 0;
 function pollProxies() {
   clearTimeout(proxyTimer);
   proxyTimer = setTimeout(async () => {
-    const m = await api('/api/media').catch(() => null); if (!m) return;
+    const m = await api('/api/media').catch(() => null);
+    if (!m) { pollProxies(); return; }  // engine busy or restarting: try again
     const changed = m.media.some(x => st.media[x.id] && st.media[x.id].proxy !== x.proxy);
     st.media = Object.fromEntries(m.media.map(x => [x.id, x]));
     if (changed) { renderBin(); resetElements(); draw(); }
@@ -364,7 +381,9 @@ function resetElements() {
 function pruneElements() {
   for (const id of Object.keys(st.els)) {
     const c = clipById(id);
-    if (!c || st.els[id].dataset.media !== c.media) { st.els[id].pause(); delete st.els[id]; }
+    if (!c || st.els[id].dataset.media !== c.media) {
+      const el = st.els[id]; el.pause(); el.removeAttribute('src'); el.load?.(); delete st.els[id];  // frees the decoder
+    }
   }
 }
 function elementFor(c) {
@@ -905,7 +924,7 @@ function bindProps(c) {
       c[k] = v;
     }));
   });
-  box.querySelectorAll('[data-pos]').forEach(el => el.addEventListener('change', () => commit(() => { c[el.dataset.pos] = clamp((+el.value || 0) / 100, el.dataset.pos === 'w' || el.dataset.pos === 'h' ? 0.01 : -2, 4); })));
+  box.querySelectorAll('[data-pos]').forEach(el => el.addEventListener('change', () => commit(() => { c[el.dataset.pos] = el.dataset.pos === 'w' || el.dataset.pos === 'h' ? clamp((+el.value || 0) / 100, 0.01, 4) : clamp((+el.value || 0) / 100, -2, 2); })));
   box.querySelectorAll('[data-t]').forEach(el => {
     const k = el.dataset.t;
     if (k === 'size') live(el, () => { c.text.size = +el.value; });
@@ -964,7 +983,9 @@ function split() {
   if (!c || t <= c.start + 0.05 || t >= c.start + c.duration - 0.05) { K.toast('Put the playhead inside the selected clip to split it.'); return; }
   const b = {...JSON.parse(JSON.stringify(c)), id: uid(), start: t, duration: c.start + c.duration - t, fade_in: 0};
   if (c.kind === 'video' || c.kind === 'audio') b.in = c.in + (t - c.start);
-  commit(p => { const a = p.clips.find(x => x.id === c.id); a.duration = t - a.start; a.fade_out = 0; p.clips.push(b); });
+  // The cut itself must be invisible: entrance/transition stay on the first half, the exit on the second.
+  delete b.transition; delete b.anim_in;
+  commit(p => { const a = p.clips.find(x => x.id === c.id); a.duration = t - a.start; a.fade_out = 0; delete a.anim_out; p.clips.push(b); });
   select_(b.id);
 }
 function duplicate() {
@@ -989,9 +1010,9 @@ document.addEventListener('keydown', e => {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 'z') { if (typing) return; e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { if (typing) return; e.preventDefault(); redo(); return; }
-  if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicate(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
   if (typing) return;
+  if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicate(); return; }
   if (e.key === ' ') { e.preventDefault(); st.playing ? stop() : play(); }
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(); }
   else if (e.key.toLowerCase() === 's') split();
@@ -1038,10 +1059,12 @@ function openDesigns() {
   $$('[data-design]').forEach(b => b.onclick = async () => {
     const d = DESIGNS[+b.dataset.design];
     $('#veDesignDialog').close();
-    if (st.dirty) await save();
-    const p = (await jsonPost('/api/video/projects', {name: d.name, format: d.format})).project;
-    await openProject(p.id);
-    K.toast(`New ${d.name.toLowerCase()} started. Earlier videos are kept in Projects.`);
+    if (!(await saveBeforeLeaving())) return;
+    try {
+      const p = (await jsonPost('/api/video/projects', {name: d.name, format: d.format})).project;
+      await openProject(p.id);
+      K.toast(`New ${d.name.toLowerCase()} started. Earlier videos are kept in Projects.`);
+    } catch (err) { K.toast('Could not start a new video: ' + err.message); }
   });
   if (!$('#veDesignDialog').open) $('#veDesignDialog').showModal();
 }
@@ -1092,8 +1115,9 @@ $('#veRecordDialog').addEventListener('close', () => {
 function renderAll() { renderTimeline(); renderProps(); }
 
 /* ---------------------------------------------------------------- projects dialog */
-$('#veOpen').onclick = async () => {
-  if (st.dirty) await save();
+$('#veOpen').onclick = () => openProjectsDialog().catch(err => K.toast('Could not list projects: ' + err.message));
+async function openProjectsDialog() {
+  if (!(await saveBeforeLeaving())) return;
   const [pr, ex] = await Promise.all([api('/api/video/projects'), api('/api/video/exports')]);
   $('#veProjectList').innerHTML = pr.projects.map(p => `
     <div class="clone-row"><span class="mono muted">${esc(p.format)}</span>
@@ -1105,18 +1129,26 @@ $('#veOpen').onclick = async () => {
       <div><b>${esc(x.file)}</b> <span class="muted">${(x.size / 1048576).toFixed(1)} MB</span></div>
       <a class="link-btn" href="/api/video/exports/${encodeURIComponent(x.file)}?download=1">Download</a>
       <button type="button" class="link-btn danger" data-delx="${esc(x.file)}">Delete</button></div>`).join('') || '<p class="muted">Nothing exported yet.</p>';
-  $$('[data-openp]').forEach(b => b.onclick = async () => { $('#veOpenDialog').close(); await openProject(b.dataset.openp); });
+  $$('[data-openp]').forEach(b => b.onclick = async () => {
+    $('#veOpenDialog').close();
+    try { await openProject(b.dataset.openp); } catch (err) { K.toast('Could not open that project: ' + err.message); }
+  });
   $$('[data-delp]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this video project? Uploaded media and exported videos are kept.')) return;
-    await api(`/api/video/projects/${b.dataset.delp}`, {method: 'DELETE'});
-    if (b.dataset.delp === P().id) { $('#veOpenDialog').close(); await openProject(null); } else $('#veOpen').click();
+    try {
+      const current = b.dataset.delp === P().id;
+      if (current) { clearTimeout(st.saveTimer); st.dirty = false; }  // a late autosave would bring it back
+      await api(`/api/video/projects/${b.dataset.delp}`, {method: 'DELETE'});
+      if (current) { $('#veOpenDialog').close(); await openProject(null); } else await openProjectsDialog();
+    } catch (err) { K.toast('Could not delete: ' + err.message); }
   });
   $$('[data-delx]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this exported video file?')) return;
-    await api(`/api/video/exports/${encodeURIComponent(b.dataset.delx)}`, {method: 'DELETE'}); $('#veOpen').click();
+    try { await api(`/api/video/exports/${encodeURIComponent(b.dataset.delx)}`, {method: 'DELETE'}); await openProjectsDialog(); }
+    catch (err) { K.toast('Could not delete: ' + err.message); }
   });
   if (!$('#veOpenDialog').open) $('#veOpenDialog').showModal();
-};
+}
 
 /* ---------------------------------------------------------------- export */
 function renderTextImages() {
@@ -1133,8 +1165,10 @@ $('#veExport').onclick = () => {
   if (!P().clips.length) { K.toast('Add something to the timeline first.'); return; }
   stop();
   $('#veExSummary').textContent = `${P().name} · ${P().width}×${P().height} · ${fmt(duration())} · saved to creations/exports/`;
-  $('#veExProgress').hidden = true; $('#veExResult').innerHTML = ''; $('#veExMsg').textContent = '';
-  $('#veExGo').disabled = false; $('#veExCancel').hidden = true;
+  if (!st.job) {  // reopened while an export runs: keep showing its progress
+    $('#veExProgress').hidden = true; $('#veExResult').innerHTML = ''; $('#veExMsg').textContent = '';
+    $('#veExGo').disabled = false; $('#veExCancel').hidden = true;
+  }
   $('#veExportDialog').showModal();
 };
 $('#veExportForm').addEventListener('submit', async e => {
@@ -1146,16 +1180,26 @@ $('#veExportForm').addEventListener('submit', async e => {
     await document.fonts?.ready;
     const body = {project: P(), text_images: renderTextImages(), quality: form.get('quality'), lufs: form.get('lufs')};
     const r = await jsonPost(`/api/video/projects/${P().id}/export`, body);
-    st.job = r.job.id; st.dirty = false; $('#veSaved').textContent = 'Saved';
+    st.job = r.job.id; st.jobFails = 0; st.dirty = false; $('#veSaved').textContent = 'Saved';
     $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExMsg').textContent = 'Exporting…';
     pollJob();
   } catch (err) { $('#veExMsg').className = 'msg error'; $('#veExMsg').textContent = err.message; $('#veExGo').disabled = false; }
 });
-$('#veExCancel').onclick = async () => { if (st.job) await jsonPost(`/api/video/jobs/${st.job}/cancel`, {}); };
+$('#veExCancel').onclick = async () => {
+  if (!st.job) return;
+  try { await jsonPost(`/api/video/jobs/${st.job}/cancel`, {}); } catch (err) { K.toast('Could not cancel: ' + err.message); }
+};
 async function pollJob() {
   if (!st.job) return;
   let job;
-  try { job = (await api(`/api/video/jobs/${st.job}`)).job; } catch { setTimeout(pollJob, 1000); return; }
+  try { job = (await api(`/api/video/jobs/${st.job}`)).job; st.jobFails = 0; } catch {
+    // The job list lives in memory, so after an engine restart the export is gone for good.
+    if (++st.jobFails < 8) { setTimeout(pollJob, 1000); return; }
+    st.job = null; $('#veExCancel').hidden = true; $('#veExGo').disabled = false;
+    $('#veExMsg').className = 'msg error';
+    $('#veExMsg').textContent = 'Lost contact with the export (was the studio restarted?). Check Projects → exports, or export again.';
+    return;
+  }
   const pct = Math.round(job.progress * 100);
   $('#veExBar').style.width = pct + '%'; $('#veExPct').textContent = pct + '%';
   if (job.status === 'running') { setTimeout(pollJob, 600); return; }
@@ -1194,11 +1238,18 @@ window.KVideo = {
   onHide() { st.shown = false; stop(); if (st.dirty) save(); },
   async addTake(rec, opts) {
     K.show('video');
-    await init();
-    await addTake(rec, opts);
+    try {
+      await init();
+      await addTake(rec, opts);
+    } catch (err) { K.toast('Could not add the take to the video: ' + err.message); return; }
     K.toast(`"${rec.name || 'Voice take'}" added to the Voice track. Select it and choose "Add captions as text" for on-screen words.`);
   },
   drawText,
 };
-window.addEventListener('beforeunload', e => { if (st.dirty) { save(); e.preventDefault(); } });
+window.addEventListener('beforeunload', e => {
+  if (!st.dirty || !P()) return;
+  // keepalive lets this last save finish even if the user does leave.
+  try { fetch(`/api/video/projects/${P().id}`, {method: 'PUT', keepalive: true, headers: {'Content-Type': 'application/json'}, body: snapshot()}); } catch {}
+  e.preventDefault(); e.returnValue = '';
+});
 })();

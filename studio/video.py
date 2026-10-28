@@ -48,6 +48,17 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def write_json(path, data, indent=2):
+    """Write JSON atomically so a crash or two overlapping saves never leave a half-written file."""
+    path = Path(path)
+    tmp = path.with_name(f'.{path.name}.{uuid.uuid4().hex[:8]}.tmp')
+    try:
+        tmp.write_text(json.dumps(data, indent=indent), encoding='utf-8')
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def tools():
     return {'ffmpeg': shutil.which('ffmpeg'), 'ffprobe': shutil.which('ffprobe')}
 
@@ -97,6 +108,11 @@ class MediaLibrary:
     def __init__(self, folder):
         self.dir = Path(folder)
         self.dir.mkdir(parents=True, exist_ok=True)
+        for stale in self.dir.glob('.upload-*'):  # left behind if the studio stopped mid-upload
+            stale.unlink(missing_ok=True)
+        for m in self.list():  # a proxy that was being made when the studio stopped
+            if m.get('proxy') == 'pending':
+                threading.Thread(target=self._make_proxy, args=(m['id'],), daemon=True).start()
 
     def _meta_path(self, mid):
         return self.dir / f'{mid}.json'
@@ -194,7 +210,7 @@ class MediaLibrary:
             meta['duration'] = None
         needs_proxy = kind == 'video' and (ext not in ('mp4', 'webm', 'm4v') or info['codec'] not in BROWSER_VIDEO)
         meta['proxy'] = 'pending' if needs_proxy else None
-        self._meta_path(mid).write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        write_json(self._meta_path(mid), meta)
         if kind in ('image', 'video'):
             self._make_thumb(meta)
         if needs_proxy:
@@ -223,16 +239,18 @@ class MediaLibrary:
                                   capture_output=True, timeout=3600)
             status = 'ready' if proc.returncode == 0 and out.is_file() else 'failed'
         meta = self.get(mid)
-        if meta:
+        if not meta:  # deleted while the proxy was being made
+            (self.dir / f'{mid}.proxy.mp4').unlink(missing_ok=True)
+        else:
             meta['proxy'] = status
-            self._meta_path(mid).write_text(json.dumps(meta, indent=2), encoding='utf-8')
+            write_json(self._meta_path(mid), meta)
 
     def rename(self, mid, name):
         meta = self.get(mid)
         if not meta:
             return None
         meta['name'] = ' '.join(str(name).split())[:80] or meta['name']
-        self._meta_path(mid).write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        write_json(self._meta_path(mid), meta)
         return meta
 
     def delete(self, mid):
@@ -360,7 +378,7 @@ class ProjectStore:
             return None
 
     def save(self, project):
-        (self.dir / f'{project["id"]}.json').write_text(json.dumps(project, indent=1), encoding='utf-8')
+        write_json(self.dir / f'{project["id"]}.json', project, indent=1)
         return project
 
     def delete(self, pid):
@@ -610,6 +628,8 @@ class ExportJobs:
         self.jobs = {}
         self.lock = threading.Lock()
         self._encoder = None
+        for stale in self.dir.glob('.*.part.mp4'):  # an export interrupted by a restart
+            stale.unlink(missing_ok=True)
 
     def encoder(self):
         if self._encoder is None:
@@ -624,42 +644,56 @@ class ExportJobs:
             raise RuntimeError('ffmpeg is required to export video: sudo apt install ffmpeg')
         if not project['clips']:
             raise ValueError('The timeline is empty. Add some media first.')
-        with self.lock:
+        job_id = uuid.uuid4().hex
+        job = {'id': job_id, 'status': 'running', 'progress': 0.0, 'file': None, 'error': None,
+               'warnings': [], 'total': 0.0, 'project': project['id'], 'proc': None}
+        with self.lock:  # claim the slot first so two clicks can't start two exports
             if any(j['status'] == 'running' for j in self.jobs.values()):
                 raise ValueError('An export is already running. Wait for it to finish.')
-        job_id = uuid.uuid4().hex
-        tmp = Path(tempfile.mkdtemp(prefix='kokoro-export-'))
-        pngs = {}
-        for cid, data in (text_images or {}).items():
-            raw = decode_png(data)
-            if raw and re.fullmatch(r'[A-Za-z0-9_-]+', str(cid)):
-                (tmp / f'{cid}.png').write_bytes(raw)
-                pngs[str(cid)] = tmp / f'{cid}.png'
-        slug = re.sub(r'[^A-Za-z0-9]+', '-', project['name']).strip('-').lower()[:40] or 'video'
-        name = f'{slug}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.mp4'
-        out = self.dir / name
-        args, total, warnings = build_command(project, resolve, pngs, self.dir / f'.{name}.part.mp4',
-                                              lufs=lufs, encoder=self.encoder(), quality=quality)
-        job = {'id': job_id, 'status': 'running', 'progress': 0.0, 'file': name, 'error': None,
-               'warnings': warnings, 'total': total, 'project': project['id'], 'proc': None}
-        with self.lock:
             self.jobs[job_id] = job
+        tmp = Path(tempfile.mkdtemp(prefix='kokoro-export-'))
+        try:
+            pngs = {}
+            for cid, data in (text_images if isinstance(text_images, dict) else {}).items():
+                raw = decode_png(data)
+                if raw and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(cid)):
+                    (tmp / f'{cid}.png').write_bytes(raw)
+                    pngs[str(cid)] = tmp / f'{cid}.png'
+            slug = re.sub(r'[^A-Za-z0-9]+', '-', project['name']).strip('-').lower()[:40] or 'video'
+            name = f'{slug}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.mp4'
+            if (self.dir / name).exists():
+                name = f'{name[:-4]}-{job_id[:4]}.mp4'
+            out = self.dir / name
+            args, total, warnings = build_command(project, resolve, pngs, self.dir / f'.{name}.part.mp4',
+                                                  lufs=lufs, encoder=self.encoder(), quality=quality)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            with self.lock:
+                self.jobs.pop(job_id, None)
+            raise
+        job.update(file=name, warnings=warnings, total=total)
         threading.Thread(target=self._run, args=(job, [exe, *args], out, tmp), daemon=True).start()
         return self.public(job)
 
     def _run(self, job, cmd, out, tmp):
         part = out.parent / f'.{out.name}.part.mp4'
+        errlog = None
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            # stderr goes to a file: a pipe nobody reads until the end can fill up and freeze ffmpeg.
+            errlog = open(tmp / 'ffmpeg.log', 'w+', encoding='utf-8', errors='replace')
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True)
             job['proc'] = proc
+            if job['status'] == 'cancelled':  # cancelled before ffmpeg had started
+                proc.kill()
             for line in proc.stdout:
                 if line.startswith('out_time_us=') or line.startswith('out_time_ms='):
                     try:
                         job['progress'] = min(0.99, int(line.split('=')[1]) / 1e6 / job['total'])
                     except ValueError:
                         pass
-            err = proc.stderr.read()
             code = proc.wait()
+            errlog.seek(0)
+            err = errlog.read()
             if job['status'] == 'cancelled':
                 part.unlink(missing_ok=True)
             elif code == 0 and part.is_file():
@@ -670,8 +704,11 @@ class ExportJobs:
                 job.update(status='failed', error=(err.strip().splitlines() or ['ffmpeg failed'])[-1][:500])
         except Exception as exc:  # noqa: BLE001
             job.update(status='failed', error=str(exc)[:500])
+            part.unlink(missing_ok=True)
         finally:
             job['proc'] = None
+            if errlog:
+                errlog.close()
             shutil.rmtree(tmp, ignore_errors=True)
 
     def cancel(self, job_id):
@@ -695,8 +732,12 @@ class ExportJobs:
         for p in sorted(self.dir.glob('*.mp4'), key=lambda p: p.stat().st_mtime, reverse=True):
             if p.name.startswith('.'):
                 continue
-            items.append({'file': p.name, 'size': p.stat().st_size,
-                          'created': datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat()})
+            try:
+                st = p.stat()
+            except OSError:  # deleted while listing
+                continue
+            items.append({'file': p.name, 'size': st.st_size,
+                          'created': datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()})
         return items
 
     def export_path(self, name):

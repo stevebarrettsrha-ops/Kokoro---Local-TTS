@@ -209,10 +209,13 @@ class CloneWorker:
     def speak(self, text, ref_path, exaggeration=0.5, cfg_weight=0.5, temperature=0.8, seed=0):
         out = self.scratch / f'{uuid.uuid4().hex}.npy'
         try:
-            self._call({'op': 'tts', 'text': text, 'ref': str(ref_path), 'out': str(out),
-                        'exaggeration': float(exaggeration), 'cfg_weight': float(cfg_weight),
-                        'temperature': float(temperature), 'seed': int(seed)})
+            reply = self._call({'op': 'tts', 'text': text, 'ref': str(ref_path), 'out': str(out),
+                                'exaggeration': float(exaggeration), 'cfg_weight': float(cfg_weight),
+                                'temperature': float(temperature), 'seed': int(seed)})
             y = np.load(out).astype(np.float32).reshape(-1)
+            sr = int(reply.get('sr') or SR)
+            if sr != SR:  # the rest of the chain runs at Kokoro's rate
+                y = fx.resample(y, sr, SR)
         finally:
             if out.exists():
                 out.unlink()

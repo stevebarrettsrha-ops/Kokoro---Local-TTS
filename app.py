@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
@@ -44,6 +45,17 @@ def local_only():
     host = (request.host or '').split(':')[0].strip('[]')
     if host not in ('127.0.0.1', 'localhost', '::1'):
         abort(403)
+    # Blocks cross-site requests: any web page can send a plain form POST to
+    # 127.0.0.1 (e.g. uploading files to fill the disk), so writes must come
+    # from the studio's own page.
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        origin = request.headers.get('Origin')
+        if origin:  # 'null' (sandboxed frames, file pages) is cross-site too
+            origin_host = urlsplit(origin).hostname or '' if origin != 'null' else ''
+            if origin_host not in ('127.0.0.1', 'localhost', '::1'):
+                abort(403)
+        elif request.headers.get('Sec-Fetch-Site') == 'cross-site':
+            abort(403)
 
 
 @app.after_request
@@ -291,6 +303,9 @@ def media_upload():
             added.append(media.add_path(tmp, f.filename or ''))
         except (ValueError, RuntimeError) as exc:
             errors.append(str(exc))
+        except Exception:  # noqa: BLE001 - one bad file must not fail the whole batch
+            app.logger.exception('Media import failed')
+            errors.append(f'"{f.filename}" could not be imported (it may be damaged or too slow to read).')
         finally:
             tmp.unlink(missing_ok=True)
     status = 200 if added or not errors else 400
@@ -387,8 +402,10 @@ def project_export(pid):
     lufs = body.get('lufs')
     lufs = None if lufs in (None, '', 'off') else vid._num(lufs, -30, -8, -14)
     quality = body.get('quality') if body.get('quality') in ('high', 'standard', 'small') else 'high'
+    text_images = body.get('text_images')
     try:
-        job = exports.start(project, _resolve_media, body.get('text_images') or {}, lufs=lufs, quality=quality)
+        job = exports.start(project, _resolve_media, text_images if isinstance(text_images, dict) else {},
+                            lufs=lufs, quality=quality)
     except (ValueError, RuntimeError) as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify({'job': job})

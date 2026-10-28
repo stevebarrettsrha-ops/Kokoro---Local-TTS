@@ -450,9 +450,10 @@ script.addEventListener('input', onEdit);
 let saveTimer = 0;
 function changed() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => store.set('kokoro-draft', {
-    text: script.value, name: $('#projectName').value, settings: readSettings(), pron: state.pron,
-  }), 400);
+  saveTimer = setTimeout(() => store.set('kokoro-draft', state.startFailed
+    // The engine didn't answer at start-up, so the panel shows fallback values: keep the saved settings.
+    ? {...(store.get('kokoro-draft', null) || {}), text: script.value, name: $('#projectName').value}
+    : {text: script.value, name: $('#projectName').value, settings: readSettings(), pron: state.pron}), 400);
   clearTimeout(estTimer); estTimer = setTimeout(updateEstimate, 150);
 }
 $('#projectName').addEventListener('input', changed);
@@ -503,15 +504,18 @@ async function loadTake(rec, autoplay = false) {
   link('#dlWav', rec.download_url); link('#dlMp3', rec.mp3_url); link('#dlSrt', rec.srt_url); link('#dlVtt', rec.vtt_url);
   $('#toVideo').disabled = false;
   state.peaks = null; paintWave();
+  let ctx = null;
   try {
     const buf = await (await fetch(rec.audio_url)).arrayBuffer();
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const dec = await ctx.decodeAudioData(buf); ctx.close();
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const dec = await ctx.decodeAudioData(buf);
+    if (state.take !== rec) return;  // another take was loaded while this one decoded
     const data = dec.getChannelData(0), n = 900, step = Math.max(1, Math.floor(data.length / n));
     const peaks = new Float32Array(n);
     for (let i = 0; i < n; i++) { let p = 0; const s0 = i * step, s1 = Math.min(data.length, s0 + step); for (let j = s0; j < s1; j += 4) p = Math.max(p, Math.abs(data[j])); peaks[i] = p; }
     state.peaks = peaks;
-  } catch { state.peaks = new Float32Array(900).fill(0.2); }
+  } catch { if (state.take !== rec) return; state.peaks = new Float32Array(900).fill(0.2); }
+  finally { ctx?.close().catch(() => {}); }
   paintWave();
   if (autoplay) audio.play().catch(() => {});
 }
@@ -610,6 +614,11 @@ function lineAtCursor() {
   }
   return line;
 }
+let previewAudio = null;
+function stopPreview() {
+  if (!previewAudio) return;
+  previewAudio.pause(); URL.revokeObjectURL(previewAudio.src); previewAudio = null;
+}
 async function preview(text) {
   if (state.busy) return;
   if (!text || !text.replace(TAG_RE, '').trim()) { toast('Put the cursor in a line (or select some text) to preview it.'); return; }
@@ -617,9 +626,10 @@ async function preview(text) {
   try {
     const r = await api('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload(text))});
     const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = new Audio(url); a.onended = () => URL.revokeObjectURL(url);
-    await a.play().catch(() => {});
+    stopPreview();  // one preview at a time
+    const a = previewAudio = new Audio(URL.createObjectURL(blob));
+    a.onended = () => { if (previewAudio === a) stopPreview(); };
+    await a.play().catch(() => { if (previewAudio === a) stopPreview(); });
     msg('Preview: ' + text.replace(TAG_RE, '').trim().slice(0, 80));
   } catch (err) { msg(err.message, 'error'); }
   finally { setBusy(false); }
@@ -645,7 +655,7 @@ $('#auditionEmotion').onclick = () => {
 };
 document.addEventListener('keydown', e => {
   if (document.body.dataset.view !== 'script') return;
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.shiftKey ? preview(lineAtCursor()) : render(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { if ($('dialog[open]')) return; e.preventDefault(); e.shiftKey ? preview(lineAtCursor()) : render(); }
   if (e.key === ' ' && !['TEXTAREA', 'INPUT', 'SELECT', 'BUTTON'].includes(document.activeElement.tagName) && document.activeElement.getAttribute('role') !== 'slider' && state.take) {
     e.preventDefault(); audio.paused ? audio.play() : audio.pause();
   }
@@ -658,7 +668,11 @@ async function refreshCount() {
 }
 async function loadTakes() {
   const list = $('#takeList');
-  const items = await refreshCount();
+  let items;
+  try {
+    items = (await api('/api/recordings')).recordings;
+    $('#takeCount').textContent = items.length || '';
+  } catch (err) { list.innerHTML = `<p class="empty">Could not load takes: ${esc(err.message)}</p>`; return; }
   if (!items.length) { list.innerHTML = '<p class="empty">No takes yet. Render something from the Script tab.</p>'; return; }
   const voiceName = id => state.catalog?.voices.find(v => v.id === id)?.name || id;
   list.innerHTML = items.map((r, i) => `
@@ -683,9 +697,9 @@ async function loadTakes() {
         <button class="link-btn danger" data-del="${r.id}">Delete</button>
       </div>
     </article>`).join('');
-  $$('.play-take').forEach(b => b.onclick = () => loadTake(items[+b.dataset.i], true));
-  $$('[data-tovideo]').forEach(b => b.onclick = () => window.KVideo?.addTake(items[+b.dataset.tovideo]));
-  $$('[data-open]').forEach(b => b.onclick = () => {
+  $$('#takeList .play-take').forEach(b => b.onclick = () => loadTake(items[+b.dataset.i], true));
+  $$('#takeList [data-tovideo]').forEach(b => b.onclick = () => window.KVideo?.addTake(items[+b.dataset.tovideo]));
+  $$('#takeList [data-open]').forEach(b => b.onclick = () => {
     const r = items[+b.dataset.open];
     if (script.value.trim() && script.value !== r.text && !confirm('Replace the current script with this take\'s script and settings?')) return;
     script.value = r.text; $('#projectName').value = r.name || '';
@@ -693,7 +707,8 @@ async function loadTakes() {
     if (Array.isArray(r.settings?.pronunciations)) { state.pron = r.settings.pronunciations; renderPron(); }
     onEdit(); show('script'); loadTake(r);
   });
-  $$('[data-del]').forEach(b => b.onclick = async () => {
+  // Scoped: the pronunciation list also has [data-del] buttons.
+  $$('#takeList [data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this take and its caption files?')) return;
     try { await api('/api/recordings/' + b.dataset.del, {method: 'DELETE'}); loadTakes(); }
     catch (err) { toast(err.message); }
@@ -812,7 +827,8 @@ async function init() {
     state.catalog.styles.forEach(s => { state.styles[s.id] = s; });
     buildEmotionUI(); selectStyle('neutral');
     const draft = store.get('kokoro-draft', null);
-    if (draft?.text) script.value = draft.text;
+    state.startFailed = true;
+    if (draft?.text) { script.value = draft.text; $('#projectName').value = draft.name || ''; }
     onEdit();
   }
   paintWave();

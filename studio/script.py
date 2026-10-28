@@ -175,6 +175,9 @@ def parse_script(source, voices=None, pronunciations=None, resolve=None, heteron
     """
     voices = voices or {}
     by_name = {name.lower(): vid for vid, name in voices.items()}
+    # Tags can't contain spaces, so "[voice=my-dad]" or "[voice=mydad]" finds a voice named "My Dad".
+    loose = lambda s: re.sub(r'[^a-z0-9]', '', s.lower())
+    by_loose = {loose(name): vid for vid, name in voices.items()}
     items, warnings = [], []
     state = {'style': None, 'intensity': None, 'voice': None, 'speed': 1.0}
 
@@ -223,6 +226,8 @@ def parse_script(source, voices=None, pronunciations=None, resolve=None, heteron
                 state['voice'] = key
             elif key in by_name:
                 state['voice'] = by_name[key]
+            elif loose(key) and loose(key) in by_loose:
+                state['voice'] = by_loose[loose(key)]
             else:
                 warnings.append(f'Unknown voice "{value}" - kept the current voice.')
         elif name in ('speed', 'pace', 'rate'):

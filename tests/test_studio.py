@@ -356,3 +356,26 @@ def test_clone_routes(cloning_engine, monkeypatch):
     assert {v['id'] for v in cat['cloned']} == {'clone:marcus', 'clone:grace'} and cat['cloning']['installed']
     assert c.get('/api/voices/clone/grace/sample').mimetype == 'audio/wav'
     assert c.delete('/api/voices/clone/grace').status_code == 200
+
+
+def test_cross_site_writes_are_blocked(engine, tmp_path, monkeypatch):
+    import io
+    import app as server
+    monkeypatch.setattr(server, 'engine', engine)
+    monkeypatch.setattr(server, 'OUT', tmp_path)
+    c = server.app.test_client()
+    form = lambda: {'name': 'X', 'consent': 'yes', 'file': (io.BytesIO(b'RIFF'), 'x.wav')}
+    # Any web page can send a plain form POST to 127.0.0.1; only the studio's own page may write.
+    assert c.post('/api/voices/clone', data=form(), headers={'Origin': 'https://evil.example'}).status_code == 403
+    assert c.post('/api/media', data={}, headers={'Origin': 'null'}).status_code == 403
+    assert c.post('/api/media', data={}, headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
+    assert c.delete('/api/recordings/' + '0' * 32, headers={'Origin': 'http://evil.example'}).status_code == 403
+    # Same-origin requests and reads still work.
+    assert c.post('/api/media', data={}, headers={'Origin': 'http://127.0.0.1:8765'}).status_code == 400
+    assert c.post('/api/media', data={}, headers={'Origin': 'http://localhost:8765'}).status_code == 400
+    assert c.get('/api/voices', headers={'Origin': 'https://evil.example'}).status_code == 200
+
+
+def test_voice_tag_matches_names_with_spaces():
+    items, warnings = parse_script('Hi there everyone. [voice=my-dad] Hello there, kids.', {**VOICE_NAMES, 'clone:my-dad-1a2b': 'My Dad'})
+    assert [i['voice'] for i in items if i['kind'] == 'speech'] == [None, 'clone:my-dad-1a2b'] and not warnings
