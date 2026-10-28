@@ -187,3 +187,55 @@ def test_export_with_every_transition_and_animation(tmp_path, assets):
     dur = float(subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0',
                                 str(jobs.export_path(done['file']))], capture_output=True, text=True).stdout)
     assert dur == pytest.approx(len(vid.TRANSITIONS) * 1.2, abs=0.3)
+
+
+def test_project_save_is_atomic(tmp_path):
+    store = vid.ProjectStore(tmp_path / 'projects')
+    p = store.save(vid.sanitize_project({'name': 'Atomic'}))
+    store.save({**p, 'name': 'Again'})
+    assert store.get(p['id'])['name'] == 'Again'
+    assert [f.name for f in (tmp_path / 'projects').iterdir()] == [f'{p["id"]}.json']  # no temp files left
+
+
+def test_stale_files_are_cleaned_on_start(tmp_path):
+    (tmp_path / 'media').mkdir()
+    (tmp_path / 'media' / '.upload-abc').write_bytes(b'x')
+    (tmp_path / 'exports').mkdir()
+    (tmp_path / 'exports' / '.video-1.mp4.part.mp4').write_bytes(b'x')
+    vid.MediaLibrary(tmp_path / 'media')
+    vid.ExportJobs(tmp_path / 'exports')
+    assert not list((tmp_path / 'media').iterdir()) and not list((tmp_path / 'exports').iterdir())
+
+
+def test_second_export_is_refused_and_bad_build_frees_the_slot(tmp_path, assets):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    pic = lib.add((assets / 'photo.png').read_bytes(), 'p.png')
+    project = vid.sanitize_project({'clips': [{'kind': 'image', 'media': pic['id'], 'duration': 1}]}, lib)
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+
+    def broken(_mid):
+        raise RuntimeError('boom')
+    with pytest.raises(RuntimeError):
+        jobs.start(project, broken, {})
+    assert not jobs.jobs  # a failed start doesn't block the next export
+    resolve = lambda mid: (lib.path(mid), False)
+    first = jobs.start(project, resolve, 'not a dict')
+    with pytest.raises(ValueError, match='already running'):
+        jobs.start(project, resolve, {})
+    end = time.time() + 60
+    while jobs.get(first['id'])['status'] == 'running' and time.time() < end:
+        time.sleep(0.2)
+    assert jobs.get(first['id'])['status'] == 'done'
+
+
+def test_upload_route_reports_every_bad_file(tmp_path, monkeypatch):
+    import io
+    import app as server
+    monkeypatch.setattr(server, 'media', vid.MediaLibrary(tmp_path / 'media'))
+
+    def slow(*_a, **_k):
+        raise subprocess.TimeoutExpired('ffprobe', 60)
+    monkeypatch.setattr(vid, 'probe', slow)
+    r = server.app.test_client().post('/api/media', data={'files': [(io.BytesIO(b'x' * 10), 'a.mp4'), (io.BytesIO(b'y'), 'b.txt')]})
+    body = r.get_json()
+    assert r.status_code == 400 and len(body['errors']) == 2 and 'a.mp4' in body['errors'][0]
