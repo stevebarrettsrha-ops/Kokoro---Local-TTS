@@ -108,6 +108,9 @@ class MediaLibrary:
     def __init__(self, folder):
         self.dir = Path(folder)
         self.dir.mkdir(parents=True, exist_ok=True)
+
+    def recover(self):
+        """Tidy up after a previous run. Call once the studio knows it is the only one running."""
         for stale in self.dir.glob('.upload-*'):  # left behind if the studio stopped mid-upload
             stale.unlink(missing_ok=True)
         for m in self.list():  # a proxy that was being made when the studio stopped
@@ -455,6 +458,23 @@ def _even(n):
 
 
 
+def text_area(c, W, H):
+    """Pixel box (x, y, w, h) a text clip can paint into, with room for glows and shadows.
+
+    static/video.js crops its text images to the same box (textArea).
+    """
+    bh = _even(c['h'] * H)
+    m = int(c['text']['size'] * min(W, H) + 0.25 * bh)
+    x0, y0 = max(0, int(c['x'] * W) - m), max(0, int(c['y'] * H) - m)
+    x1, y1 = min(W, int((c['x'] + c['w']) * W) + m), min(H, int((c['y'] + c['h']) * H) + m)
+    return x0, y0, max(2, (x1 - x0) // 2 * 2), max(2, (y1 - y0) // 2 * 2)
+
+
+def png_size(raw):
+    """(width, height) from a PNG's header."""
+    return int.from_bytes(raw[16:20], 'big'), int.from_bytes(raw[20:24], 'big')
+
+
 def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='libx264', quality='high'):
     """Return (ffmpeg args, total seconds, warnings).
 
@@ -482,32 +502,35 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
         mp = plan.get(c['id'], {'ext': 0.0, 'in': None, 'out': None})
         start, ext = c['start'], mp['ext']
         dur = c['duration'] + ext  # held longer when the next clip transitions in over it
-        needs_scale = any(a and MOTION[a[0]][2] != 1 for a in (mp['in'], mp['out']))
         text_box = None
         bw, bh = _even(c['w'] * W), _even(c['h'] * H)
         bx, by = int(round(c['x'] * W)), int(round(c['y'] * H))
         chain = []
+        src = None  # input pad; None for sources generated inside the filter graph
         opacity = c['opacity']
+        # Stills (text, pictures, colours) are made once and held with tpad. Feeding ffmpeg a
+        # looped image re-decodes it every frame and queues full frames in memory: a few hundred
+        # captions used to need >13 GB and get the export killed.
+        hold = [f'tpad=stop_mode=clone:stop_duration={dur:.3f}', f'trim=duration={dur:.3f}']
         if c['kind'] == 'color':
             col = c['color'].lstrip('#')
             opacity *= int(col[6:8], 16) / 255 if len(col) == 8 else 1.0  # lavfi colour has no alpha
-            idx = add_input('-f', 'lavfi', '-t', f'{dur:.3f}', '-i', f'color=c=0x{col[:6]}:s={bw}x{bh}:r={fps}')
-            chain.append('format=rgba')
+            chain += [f'color=c=0x{col[:6]}:s={bw}x{bh}:r={fps}:d={1 / fps:.4f}', 'format=rgba', *hold]
         elif c['kind'] == 'text':
             png = text_pngs.get(c['id'])
             if not png:
                 warnings.append(f'Text "{c["text"]["content"][:30]}" was skipped (no rendered image).')
                 continue
-            idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(png))
-            bx, by = 0, 0  # text images are full frame with the text already placed
-            chain.append('format=rgba')
-            if needs_scale:  # crop to the text box (plus room for glows) so it scales around itself
-                m = int(c['text']['size'] * min(W, H) + 0.25 * bh)
-                x0, y0 = max(0, int(c['x'] * W) - m), max(0, int(c['y'] * H) - m)
-                x1, y1 = min(W, int((c['x'] + c['w']) * W) + m), min(H, int((c['y'] + c['h']) * H) + m)
-                cw, ch = max(2, (x1 - x0) // 2 * 2), max(2, (y1 - y0) // 2 * 2)
-                chain.append(f'crop={cw}:{ch}:{x0}:{y0}')
+            if isinstance(png, dict):  # already cropped to the text area by the editor
+                idx = add_input('-framerate', str(fps), '-i', str(png['path']))
+                chain += ['format=rgba', *hold]
+                bx, by, text_box = png['x'], png['y'], (png['w'], png['h'])
+            else:  # a full-frame image: keep only the text box (plus room for glows and shadows)
+                idx = add_input('-framerate', str(fps), '-i', str(png))
+                x0, y0, cw, ch = text_area(c, W, H)
+                chain += ['format=rgba', f'crop={cw}:{ch}:{x0}:{y0}', *hold]
                 bx, by, text_box = x0, y0, (cw, ch)
+            src = f'[{idx}:v]'
         else:
             path, has_audio = resolve(c['media'])
             if path is None:
@@ -515,15 +538,18 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 continue
             if c['kind'] == 'image' and c['zoom'] > 0:
                 idx = add_input('-i', str(path))
+                src = f'[{idx}:v]'
                 frames = max(1, int(round(dur * fps)))
                 chain.append(f'scale={bw * 2}:{bh * 2}:force_original_aspect_ratio=increase,crop={bw * 2}:{bh * 2},setsar=1')
                 chain.append(f"zoompan=z='1+{c['zoom']:.4f}*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                              f':d={frames}:s={bw}x{bh}:fps={fps}')
             else:
                 if c['kind'] == 'image':
-                    idx = add_input('-loop', '1', '-framerate', str(fps), '-t', f'{dur:.3f}', '-i', str(path))
+                    idx = add_input('-framerate', str(fps), '-i', str(path))
+                    src = f'[{idx}:v]'
                 else:
                     idx = add_input('-ss', f'{c["in"]:.3f}', '-t', f'{dur:.3f}', '-i', str(path))
+                    src = f'[{idx}:v]'
                     if ext > 0:  # hold the last frame if the source runs out during a transition
                         chain.append(f'tpad=stop_mode=clone:stop_duration={ext:.3f}')
                 if c['fit'] == 'contain':
@@ -532,6 +558,8 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
                 else:
                     chain.append(f'scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh}')
                 chain.append('setsar=1')
+                if c['kind'] == 'image':
+                    chain += ['format=rgba', *hold]  # scaled once, then held
             chain.append(f'fps={fps},format=rgba')
             if c['kind'] == 'video' and has_audio and not c['muted'] and c['volume'] > 0:
                 audio_labels.append(_audio_chain(fc, f'{idx}:a', c, len(audio_labels)))
@@ -556,7 +584,7 @@ def build_command(project, resolve, text_pngs, out_path, *, lufs=None, encoder='
             chain.append(f"scale=w='trunc(max(2,{ow}*{scale})/2)*2':h='trunc(max(2,{oh}*{scale})/2)*2':eval=frame")
             chain.append(f'pad=w={pw}:h={ph}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame')
         chain.append(f'setpts=PTS-STARTPTS+{start:.3f}/TB')
-        fc.append(f'[{idx}:v]' + ','.join(chain) + f'[v{k}]')
+        fc.append((src or '') + ','.join(chain) + f'[v{k}]')
         nxt = f'base{k + 1}'
         x = f"{bx}+{W}*({dx})-(w-{ow})/2" if (scale or dx != '0') else str(bx)
         y = f"{by}+{H}*({dy})-(h-{oh})/2" if (scale or dy != '0') else str(by)
@@ -620,16 +648,34 @@ def decode_png(data_url, max_bytes=20 * 1024 * 1024):
 
 
 class ExportJobs:
-    """Runs exports in the background and reports progress."""
+    """Runs exports in the background and reports progress.
+
+    Each export keeps its request (project snapshot + rendered text images) and
+    state in exports/.jobs/<id>/ until it finishes, so an export interrupted by
+    a restart starts again by itself (see resume) and the editor can find it.
+    """
+    KEEP_FINISHED = 30  # finished job records kept for the editor to read
 
     def __init__(self, folder):
         self.dir = Path(folder)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.jobs_dir = self.dir / '.jobs'
+        self.jobs_dir.mkdir(exist_ok=True)
         self.jobs = {}
         self.lock = threading.Lock()
         self._encoder = None
-        for stale in self.dir.glob('.*.part.mp4'):  # an export interrupted by a restart
-            stale.unlink(missing_ok=True)
+        records = []
+        for f in self.jobs_dir.glob('*/job.json'):
+            try:
+                job = json.loads(f.read_text(encoding='utf-8'))
+                if ID_RE.fullmatch(job.get('id', '')) and job['id'] == f.parent.name:
+                    records.append(job)
+            except (OSError, ValueError, AttributeError):
+                shutil.rmtree(f.parent, ignore_errors=True)
+        records.sort(key=lambda j: j.get('created') or '')
+        for job in records:
+            job['proc'] = None
+            self.jobs[job['id']] = job
 
     def encoder(self):
         if self._encoder is None:
@@ -637,6 +683,11 @@ class ExportJobs:
             out = subprocess.run([exe, '-hide_banner', '-encoders'], capture_output=True, text=True).stdout if exe else ''
             self._encoder = 'libx264' if 'libx264' in out else 'mpeg4'
         return self._encoder
+
+    def _save(self, job):
+        folder = self.jobs_dir / job['id']
+        if folder.is_dir():
+            write_json(folder / 'job.json', self.public(job))
 
     def start(self, project, resolve, text_images, *, lufs=None, quality='high'):
         exe = tools()['ffmpeg']
@@ -646,41 +697,115 @@ class ExportJobs:
             raise ValueError('The timeline is empty. Add some media first.')
         job_id = uuid.uuid4().hex
         job = {'id': job_id, 'status': 'running', 'progress': 0.0, 'file': None, 'error': None,
-               'warnings': [], 'total': 0.0, 'project': project['id'], 'proc': None}
+               'warnings': [], 'total': 0.0, 'project': project['id'], 'created': now(), 'resumed': False,
+               'proc': None}
         with self.lock:  # claim the slot first so two clicks can't start two exports
             if any(j['status'] == 'running' for j in self.jobs.values()):
                 raise ValueError('An export is already running. Wait for it to finish.')
             self.jobs[job_id] = job
-        tmp = Path(tempfile.mkdtemp(prefix='kokoro-export-'))
+        folder = self.jobs_dir / job_id
         try:
-            pngs = {}
+            folder.mkdir()
+            images = {}
             for cid, data in (text_images if isinstance(text_images, dict) else {}).items():
-                raw = decode_png(data)
-                if raw and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(cid)):
-                    (tmp / f'{cid}.png').write_bytes(raw)
-                    pngs[str(cid)] = tmp / f'{cid}.png'
+                # Either a full-frame data URL, or {png, x, y} cropped to the text area.
+                raw = decode_png(data.get('png') if isinstance(data, dict) else data)
+                if not raw or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(cid)):
+                    continue
+                entry = {'file': f'{cid}.png'}
+                if isinstance(data, dict):
+                    w, h = png_size(raw)
+                    if not (0 < w <= 2 * project['width'] and 0 < h <= 2 * project['height']):
+                        continue
+                    entry.update(x=int(_num(data.get('x'), -project['width'], project['width'], 0)),
+                                 y=int(_num(data.get('y'), -project['height'], project['height'], 0)), w=w, h=h)
+                (folder / entry['file']).write_bytes(raw)
+                images[str(cid)] = entry
             slug = re.sub(r'[^A-Za-z0-9]+', '-', project['name']).strip('-').lower()[:40] or 'video'
             name = f'{slug}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.mp4'
             if (self.dir / name).exists():
                 name = f'{name[:-4]}-{job_id[:4]}.mp4'
-            out = self.dir / name
-            args, total, warnings = build_command(project, resolve, pngs, self.dir / f'.{name}.part.mp4',
-                                                  lufs=lufs, encoder=self.encoder(), quality=quality)
+            job['file'] = name
+            write_json(folder / 'request.json', {'project': project, 'images': images, 'lufs': lufs, 'quality': quality})
+            cmd = self._command(job, resolve)
+            self._save(job)
         except BaseException:
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(folder, ignore_errors=True)
             with self.lock:
                 self.jobs.pop(job_id, None)
             raise
-        job.update(file=name, warnings=warnings, total=total)
-        threading.Thread(target=self._run, args=(job, [exe, *args], out, tmp), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, cmd), daemon=True).start()
         return self.public(job)
 
-    def _run(self, job, cmd, out, tmp):
-        part = out.parent / f'.{out.name}.part.mp4'
+    def _command(self, job, resolve):
+        """Build the ffmpeg command from the job's saved request (also used to resume)."""
+        folder = self.jobs_dir / job['id']
+        req = json.loads((folder / 'request.json').read_text(encoding='utf-8'))
+        pngs = {}
+        for cid, e in req['images'].items():
+            path = folder / e['file']
+            if path.is_file():
+                pngs[cid] = {'path': path, **{k: e[k] for k in ('x', 'y', 'w', 'h')}} if 'w' in e else path
+        part = self.dir / f'.{job["file"]}.part.mp4'
+        args, total, warnings = build_command(req['project'], resolve, pngs, part, lufs=req['lufs'],
+                                              encoder=self.encoder(), quality=req['quality'])
+        job.update(total=total, warnings=warnings)
+        return [tools()['ffmpeg'], *args]
+
+    def recover(self, resolve):
+        """After a restart: drop half-written files and old records, and start again any export
+        the last run didn't finish. Returns the ids restarted.
+
+        Only call this once the studio knows it is the only one running (app.py binds the port
+        first): a second copy started by mistake must not touch a running export's files.
+        """
+        for stale in self.dir.glob('.*.part.mp4'):
+            stale.unlink(missing_ok=True)
+        with self.lock:
+            finished = sorted((j for j in self.jobs.values() if j['status'] != 'running'), key=lambda j: j.get('created') or '')
+            for old in finished[:-self.KEEP_FINISHED]:
+                shutil.rmtree(self.jobs_dir / old['id'], ignore_errors=True)
+                self.jobs.pop(old['id'], None)
+        return self.resume(resolve)
+
+    def resume(self, resolve):
+        """Start again any export a restart interrupted. Returns the ids restarted."""
+        if not tools()['ffmpeg']:
+            return []
+        with self.lock:
+            pending = sorted((j for j in self.jobs.values() if j['status'] == 'running' and not j['proc']),
+                             key=lambda j: j.get('created') or '', reverse=True)
+        restarted = []
+        for i, job in enumerate(pending):
+            try:
+                if i:  # only one export runs at a time
+                    raise RuntimeError('Interrupted when the studio stopped. Export again.')
+                cmd = self._command(job, resolve)
+            except Exception as exc:  # noqa: BLE001
+                job.update(status='failed', error=str(exc)[:500] or 'Interrupted when the studio stopped.')
+                self._finish(job)
+                continue
+            job.update(progress=0.0, resumed=True, error=None)
+            self._save(job)
+            threading.Thread(target=self._run, args=(job, cmd), daemon=True).start()
+            restarted.append(job['id'])
+        return restarted
+
+    def _finish(self, job):
+        """Record the outcome and drop the job's request files (only job.json stays)."""
+        self._save(job)
+        folder = self.jobs_dir / job['id']
+        for f in folder.glob('*'):
+            if f.name != 'job.json':
+                f.unlink(missing_ok=True)
+
+    def _run(self, job, cmd):
+        out = self.dir / job['file']
+        part = self.dir / f'.{out.name}.part.mp4'
         errlog = None
         try:
             # stderr goes to a file: a pipe nobody reads until the end can fill up and freeze ffmpeg.
-            errlog = open(tmp / 'ffmpeg.log', 'w+', encoding='utf-8', errors='replace')
+            errlog = tempfile.TemporaryFile('w+', encoding='utf-8', errors='replace')
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True)
             job['proc'] = proc
             if job['status'] == 'cancelled':  # cancelled before ffmpeg had started
@@ -709,7 +834,7 @@ class ExportJobs:
             job['proc'] = None
             if errlog:
                 errlog.close()
-            shutil.rmtree(tmp, ignore_errors=True)
+            self._finish(job)
 
     def cancel(self, job_id):
         job = self.jobs.get(job_id)
@@ -726,6 +851,13 @@ class ExportJobs:
     def get(self, job_id):
         job = self.jobs.get(job_id)
         return self.public(job) if job else None
+
+    def active(self, project_id=None):
+        """Running exports (newest first), so a reloaded editor can show their progress."""
+        with self.lock:
+            jobs = [j for j in self.jobs.values() if j['status'] == 'running'
+                    and (project_id is None or j.get('project') == project_id)]
+        return [self.public(j) for j in sorted(jobs, key=lambda j: j.get('created') or '', reverse=True)]
 
     def exports(self):
         items = []

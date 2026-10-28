@@ -389,3 +389,25 @@ def test_blockwise_true_peak_matches_whole_signal():
     whole = np.maximum(up[: len(y) * 4].reshape(-1, 4).max(axis=1), np.abs(y))
     assert np.array_equal(fx._peak_env(y), whole)
     assert fx.true_peak_db(fx.limit(y, 48000, -1.0)) <= -0.99
+
+
+def test_recordings_are_paged_and_summarised(tmp_path, monkeypatch):
+    import app as server
+    monkeypatch.setattr(server, 'OUT', tmp_path)
+    for i in range(230):
+        rid = f'{i:032x}'
+        (tmp_path / f'{rid}.wav').write_bytes(b'RIFF')
+        (tmp_path / f'{rid}.json').write_text(json.dumps({'id': rid, 'name': f'Take {i}', 'created': f'2026-01-01T00:{i // 60:02d}:{i % 60:02d}',
+                                                          'text': 'x' * 5000, 'segments': [{'start': 0, 'end': 1, 'style': 'sad', 'text': 'x' * 200}]}))
+    c = server.app.test_client()
+    first = c.get('/api/recordings?limit=50').get_json()
+    assert first['total'] == 230 and len(first['recordings']) == 50 and first['more']
+    assert first['recordings'][0]['name'] == 'Take 229' and first['recordings'][0]['text']
+    last = c.get('/api/recordings?offset=200&limit=50').get_json()
+    assert len(last['recordings']) == 30 and not last['more'] and last['recordings'][-1]['name'] == 'Take 0'
+    summary = c.get('/api/recordings?summary=1').get_json()['recordings']
+    assert len(summary) == 230  # the video editor sees every take, not just the newest 200
+    assert 'text' not in summary[0] and summary[0]['segments'] == [{'start': 0, 'end': 1, 'style': 'sad'}]
+    assert summary[0]['audio_url'].startswith('/api/audio/')
+    (tmp_path / f'{0:032x}.wav').unlink()  # a take whose audio is gone is not listed
+    assert c.get('/api/recordings?limit=1').get_json()['total'] == 229

@@ -74,7 +74,7 @@ uv pip install --python .venv/bin/python torch --index-url https://download.pyto
 
 ## Video editor
 
-The **Video** tab is a Canva-style editor built into the studio. It runs entirely on your computer; ffmpeg does the final render.
+The **Video** tab is a Canva-style editor built into the studio. It runs entirely on your computer; ffmpeg does the final render. If the studio is stopped during an export, the export starts again by itself the next time you run `./start.sh`, and the editor picks up its progress.
 
 - **Create a video**: pick Landscape, YouTube, YouTube Shorts, TikTok, Instagram Reel, Facebook, Instagram post or Square, and the frame is set up for you. You can change the format at any time.
 - **Uploads**: drop in pictures (JPG, PNG, WebP), video (MP4, MOV including iPhone HEVC, WebM, MKV) or music (MP3, WAV, M4A…). **Record yourself** captures camera and mic straight into your uploads. Videos the browser can't play get a lightweight preview copy; the export always uses the original.

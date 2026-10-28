@@ -47,7 +47,7 @@ const api = async (url, opts) => {
     return r;
   }
   const j = await r.json().catch(() => ({error: `Unexpected response (${r.status})`}));
-  if (!r.ok) throw Error(j.error || `Server error ${r.status}`);
+  if (!r.ok) throw Object.assign(Error(j.error || `Server error ${r.status}`), {status: r.status});
   return j;
 };
 
@@ -663,16 +663,27 @@ document.addEventListener('keydown', e => {
 
 /* ---------- takes ---------- */
 async function refreshCount() {
-  try { const d = await api('/api/recordings'); $('#takeCount').textContent = d.recordings.length || ''; return d.recordings; }
-  catch { return []; }
+  try { const d = await api('/api/recordings?limit=1'); $('#takeCount').textContent = d.total || ''; return d.total; }
+  catch { return 0; }
 }
-async function loadTakes() {
+const TAKES_PAGE = 50;
+const takes = {items: [], total: 0};
+// First page, or the next page of older takes when `more` is set.
+async function loadTakes(more = false) {
   const list = $('#takeList');
-  let items;
   try {
-    items = (await api('/api/recordings')).recordings;
-    $('#takeCount').textContent = items.length || '';
-  } catch (err) { list.innerHTML = `<p class="empty">Could not load takes: ${esc(err.message)}</p>`; return; }
+    const d = await api(`/api/recordings?offset=${more ? takes.items.length : 0}&limit=${TAKES_PAGE}`);
+    takes.items = more ? takes.items.concat(d.recordings.filter(r => !takes.items.some(x => x.id === r.id))) : d.recordings;
+    takes.total = d.total;
+    $('#takeCount').textContent = d.total || '';
+  } catch (err) {
+    if (more) { toast('Could not load older takes: ' + err.message); return; }
+    list.innerHTML = `<p class="empty">Could not load takes: ${esc(err.message)}</p>`; return;
+  }
+  renderTakes();
+}
+function renderTakes() {
+  const list = $('#takeList'), items = takes.items;
   if (!items.length) { list.innerHTML = '<p class="empty">No takes yet. Render something from the Script tab.</p>'; return; }
   const voiceName = id => state.catalog?.voices.find(v => v.id === id)?.name || id;
   list.innerHTML = items.map((r, i) => `
@@ -696,7 +707,9 @@ async function loadTakes() {
         ${r.text ? `<button class="link-btn" data-open="${i}">Open script</button>` : ''}
         <button class="link-btn danger" data-del="${r.id}">Delete</button>
       </div>
-    </article>`).join('');
+    </article>`).join('') + (takes.total > items.length
+      ? `<p class="empty"><button class="btn" id="moreTakes">Show older takes (${takes.total - items.length} more)</button></p>` : '');
+  $('#moreTakes')?.addEventListener('click', e => { e.target.disabled = true; loadTakes(true); });
   $$('#takeList .play-take').forEach(b => b.onclick = () => loadTake(items[+b.dataset.i], true));
   $$('#takeList [data-tovideo]').forEach(b => b.onclick = () => window.KVideo?.addTake(items[+b.dataset.tovideo]));
   $$('#takeList [data-open]').forEach(b => b.onclick = () => {
@@ -710,11 +723,15 @@ async function loadTakes() {
   // Scoped: the pronunciation list also has [data-del] buttons.
   $$('#takeList [data-del]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this take and its caption files?')) return;
-    try { await api('/api/recordings/' + b.dataset.del, {method: 'DELETE'}); loadTakes(); }
-    catch (err) { toast(err.message); }
+    try {
+      await api('/api/recordings/' + b.dataset.del, {method: 'DELETE'});
+      // Remove it in place so older pages that were loaded (and the scroll position) stay.
+      takes.items = takes.items.filter(x => x.id !== b.dataset.del); takes.total = Math.max(0, takes.total - 1);
+      $('#takeCount').textContent = takes.total || ''; renderTakes();
+    } catch (err) { toast(err.message); }
   });
 }
-$('#refreshTakes').onclick = loadTakes;
+$('#refreshTakes').onclick = () => loadTakes();
 
 /* ---------- voices & cloning ---------- */
 function renderVoiceOptions() {
