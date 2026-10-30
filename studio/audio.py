@@ -222,5 +222,5 @@ def encode_mp3(wav_path, mp3_path, bitrate='192k'):
     if not ffmpeg:
         return False
     proc = subprocess.run([ffmpeg, '-y', '-loglevel', 'error', '-i', str(wav_path), '-codec:a', 'libmp3lame',
-                           '-b:a', bitrate, str(mp3_path)], capture_output=True, timeout=300)
+                           '-b:a', bitrate, str(mp3_path)], capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
     return proc.returncode == 0

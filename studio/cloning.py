@@ -33,6 +33,7 @@ SOURCE_MAX_SECONDS = 30 * 60   # longest recording the cutter opens (the first 3
 SUGGEST_SECONDS = 20.0          # length of the "best part" the cutter preselects
 PEAKS = 1600                    # waveform resolution sent to the cutter
 SOURCE_RE = re.compile(r'[0-9a-f]{32}')
+_SAVE_LOCK = threading.Lock()  # two voices created at once must not pick the same file name
 
 
 def slugify(name):
@@ -82,14 +83,15 @@ class VoiceLibrary:
 
     def _save(self, y, name, gender, source_name, extra=None):
         ref, info = prepare_reference(y)
-        slug = slugify(name)
-        if (self.dir / f'{slug}.json').exists():
-            slug = f'{slug}-{uuid.uuid4().hex[:4]}'
-        sf.write(str(self.dir / f'{slug}.wav'), ref, SR, subtype='PCM_16')
         meta = {'name': name, 'gender': gender if gender in ('Female', 'Male') else '',
                 'seconds': round(len(ref) / SR, 1), 'created': datetime.now(timezone.utc).isoformat(),
                 'source_file': Path(source_name or '').name[:80], **info, **(extra or {})}
-        (self.dir / f'{slug}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        with _SAVE_LOCK:
+            slug = slugify(name)
+            if (self.dir / f'{slug}.json').exists() or (self.dir / f'{slug}.wav').exists():
+                slug = f'{slug}-{uuid.uuid4().hex[:4]}'
+            sf.write(str(self.dir / f'{slug}.wav'), ref, SR, subtype='PCM_16')
+            (self.dir / f'{slug}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
         return self.get(CLONE_PREFIX + slug)
 
     # ---- sources: a recording opened in the cutter, before the voice is made ----
@@ -138,25 +140,36 @@ class VoiceLibrary:
             except OSError:
                 continue
 
+    def clear_sources(self):
+        """At start-up: recordings opened in a previous run (and half-finished uploads) are never used again."""
+        for f in self.sources.glob('*'):
+            f.unlink(missing_ok=True)
+
     def add_from_source(self, sid, start, end, name, gender=''):
         """Make a voice from the part [start, end] (seconds) of an opened source."""
         name = _clean_name(name)
+        gone = ValueError('That recording is no longer open. Choose it again.')
         path = self.source_path(sid)
         if path is None:
-            raise ValueError('That recording is no longer open. Choose it again.')
-        y, sr = sf.read(str(path), dtype='float32')
-        dur = len(y) / sr
+            raise gone
         try:
-            a, b = max(0.0, float(start)), min(dur, float(end))
-        except (TypeError, ValueError):
-            a, b = 0.0, dur
-        if not (b - a >= 1.0) or not np.isfinite(a + b):
-            raise ValueError('Select at least a few seconds of the recording.')
+            info = sf.info(str(path))
+            sr, dur = info.samplerate, info.frames / info.samplerate
+            try:
+                a, b = max(0.0, float(start)), min(dur, float(end))
+            except (TypeError, ValueError):
+                a, b = 0.0, dur
+            if not (b - a >= 1.0) or not np.isfinite(a + b):
+                raise ValueError('Select at least a few seconds of the recording.')
+            # Only the selected part is read: selecting all of a 30-minute file stays small.
+            y, _ = sf.read(str(path), dtype='float32', start=int(a * sr), stop=int(b * sr))
+        except (RuntimeError, OSError) as exc:  # removed while being read (e.g. another file was chosen)
+            raise gone from exc
         try:
             meta = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             meta = {}
-        voice = self._save(y[int(a * sr):int(b * sr)], name, gender, meta.get('name', ''),
+        voice = self._save(y, name, gender, meta.get('name', ''),
                            {'cut': [round(a, 2), round(b, 2)]})
         self.delete_source(sid)
         return voice
@@ -179,38 +192,56 @@ def _clean_name(name):
     return name
 
 
+def _finite(y):
+    """Float files can hold NaN/inf samples; they would break loudness maths and JSON."""
+    return np.nan_to_num(np.asarray(y, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def decode_file(path, max_seconds=SOURCE_MAX_SECONDS):
     """Audio track of any file ffmpeg (or soundfile) can read -> mono float32 at 24 kHz.
 
-    Reads from disk, so large videos never sit in memory; stops after max_seconds.
+    Reads from disk and streams through ffmpeg, which converts to mono 24 kHz as it goes, so
+    memory stays at the size of the result (~170 MB for 30 min) whatever the file's own format.
+    soundfile is the fallback when ffmpeg is not installed. Stops after max_seconds.
     """
     path = Path(path)
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg:
+        proc = subprocess.run([ffmpeg, '-nostdin', '-loglevel', 'error', '-i', str(path), '-vn', '-t', str(max_seconds),
+                               '-ac', '1', '-ar', str(SR), '-f', 'f32le', 'pipe:1'],
+                              capture_output=True, timeout=600, stdin=subprocess.DEVNULL)
+        if proc.returncode == 0 and proc.stdout:
+            return _finite(np.frombuffer(proc.stdout, dtype=np.float32))
     try:
         info = sf.info(str(path))
-        if info.frames / info.samplerate <= max_seconds + 1:
-            y, sr = sf.read(str(path), dtype='float32', always_2d=True)
-            return fx.resample(y.mean(axis=1), int(sr), SR)
+        frames = min(info.frames, int(max_seconds * info.samplerate))
+        y, sr = sf.read(str(path), dtype='float32', always_2d=True, frames=frames)
+        return _finite(fx.resample(y.mean(axis=1), int(sr), SR))
     except Exception:  # noqa: BLE001 - not a format soundfile knows (mp4, m4a, webm...)
         pass
-    ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise ValueError('Could not read that file. Use WAV, FLAC, OGG or MP3, or install ffmpeg for other formats.')
-    proc = subprocess.run([ffmpeg, '-loglevel', 'error', '-i', str(path), '-vn', '-t', str(max_seconds),
-                           '-ac', '1', '-ar', str(SR), '-f', 'f32le', 'pipe:1'], capture_output=True, timeout=600)
-    if proc.returncode != 0 or not proc.stdout:
-        raise ValueError('Could not find any sound in that file.')
-    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+    raise ValueError('Could not find any sound in that file.')
 
 
 def _speech_frames(y, hop):
-    """Per frame: speech present and not clipped."""
+    """Per frame: sound that rises and falls like syllables, loud enough, and not clipped.
+
+    The syllable test (a >10 dB spread between the loud and quiet 20 ms slices of the frame)
+    keeps a steady music bed or noise from scoring higher than real speech, whose pauses would
+    otherwise count against it.
+    """
     frames = len(y) // hop
     if not frames:
         return np.zeros(0, bool)
     f = y[: frames * hop].reshape(frames, hop)
-    rms = np.sqrt(np.mean(f.astype(np.float64) ** 2, axis=1))
+    rms = np.sqrt(np.einsum('ij,ij->i', f, f, dtype=np.float64) / hop)  # no float64 copy of the audio
     clipped = np.mean(np.abs(f) > 0.985, axis=1)
-    return (rms > rms.max() * 10 ** (-30 / 20)) & (clipped < 0.002)
+    slices = 25
+    sub = f[:, : hop // slices * slices].reshape(frames, slices, hop // slices)
+    sub_db = 10 * np.log10(np.einsum('ijk,ijk->ij', sub, sub, dtype=np.float64) / (hop // slices) + 1e-10)
+    modulated = np.percentile(sub_db, 90, axis=1) - np.percentile(sub_db, 10, axis=1) > 10
+    return (rms > rms.max() * 10 ** (-30 / 20)) & (clipped < 0.002) & modulated
 
 
 def best_part(y, seconds=SUGGEST_SECONDS):
@@ -252,9 +283,8 @@ def decode_audio(data: bytes, filename: str = ''):
                               input=data, capture_output=True, timeout=120)
         if proc.returncode != 0 or not proc.stdout:
             raise ValueError('Could not read that audio file.')
-        return np.frombuffer(proc.stdout, dtype=np.float32).copy()
-    y = y.mean(axis=1)
-    return fx.resample(y, int(sr), SR)
+        return _finite(np.frombuffer(proc.stdout, dtype=np.float32))
+    return _finite(fx.resample(y.mean(axis=1), int(sr), SR))
 
 
 def prepare_reference(y):
@@ -306,12 +336,18 @@ class CloneWorker:
         self.scratch = root / 'outputs' / '.clone-tmp'
 
     def setup_state(self):
-        """'installing', 'interrupted' (setup stopped part-way) or None."""
+        """'installing', 'interrupted' (setup stopped part-way) or None.
+
+        The lock holds the setup's process id. That id only counts if it still is setup-cloning.sh:
+        after a reboot the id may belong to another program, and a finished setup that nobody
+        collected (a zombie) still answers kill(0) but has an empty command line.
+        """
         if not self.setup_lock or not self.setup_lock.exists():
             return None
         try:
-            os.kill(int(self.setup_lock.read_text().strip()), 0)
-            return 'installing'
+            pid = int(self.setup_lock.read_text().strip())
+            cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()
+            return 'installing' if b'setup-cloning' in cmdline else 'interrupted'
         except (ValueError, OSError):
             return 'interrupted'
 

@@ -6,10 +6,11 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, request, send_file, send_from_directory
+from flask import Flask, Request, abort, jsonify, request, send_file, send_from_directory
 
 from studio.engine import Engine
 from studio.engine import bounded as engine_bounded
@@ -25,7 +26,33 @@ CREATIONS = HERE / 'creations'  # everything the video editor makes lives here
 media = vid.MediaLibrary(CREATIONS / 'media')
 projects = vid.ProjectStore(CREATIONS / 'projects')
 exports = vid.ExportJobs(CREATIONS / 'exports')
+INCOMING = CREATIONS / '.incoming'  # uploads stream here while they arrive
+
+
+class StudioRequest(Request):
+    """Uploads are written straight into the app folder (not the system temp folder, which may be
+    in RAM) so save_upload() can move them into place instead of copying a multi-GB video."""
+
+    def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
+        INCOMING.mkdir(parents=True, exist_ok=True)
+        return tempfile.NamedTemporaryFile('wb+', dir=INCOMING, prefix='upload-')
+
+
+def save_upload(upload, dst):
+    """Put an uploaded file at dst: a hard link when possible (no copy, no extra disk), else a copy."""
+    name = getattr(upload.stream, 'name', None)
+    if isinstance(name, str) and os.path.isfile(name):
+        try:
+            upload.stream.flush()
+            os.link(name, dst)
+            return
+        except OSError:
+            pass  # another disk, or links not supported: copy instead
+    upload.save(dst)
+
+
 app = Flask(__name__, static_folder=None)
+app.request_class = StudioRequest
 app.json.sort_keys = False
 app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 ** 3  # video uploads can be large
 
@@ -98,9 +125,9 @@ def _json_object():
     return body if isinstance(body, dict) else {}
 
 
-@app.errorhandler(ValueError)
+@app.errorhandler(vid.InputError)
 def bad_input(exc):
-    """Validation errors (e.g. too many clips) reach the editor as a readable message."""
+    """Requests the user can fix (e.g. too many clips) reach the editor as a readable message."""
     return jsonify({'error': str(exc)[:600]}), 400
 
 
@@ -274,7 +301,7 @@ def open_voice_source():
             return jsonify({'error': 'Choose a recording.'}), 400
         tmp = engine.library.sources / f'.upload-{os.urandom(8).hex()}'
         try:
-            upload.save(tmp)
+            save_upload(upload, tmp)
             if not tmp.stat().st_size:
                 return jsonify({'error': 'The file is empty.'}), 400
             return jsonify({'source': engine.library.open_source(tmp, upload.filename or '')})
@@ -292,7 +319,10 @@ def voice_source_audio(sid):
     path = engine.library.source_path(sid)
     if path is None:
         abort(404)
-    return send_file(path, mimetype='audio/wav', conditional=True)
+    try:
+        return send_file(path, mimetype='audio/wav', conditional=True)
+    except FileNotFoundError:  # replaced by another recording a moment ago
+        abort(404)
 
 
 @app.delete('/api/voices/sources/<sid>')
@@ -393,7 +423,7 @@ def media_upload():
     for f in files[:50]:
         tmp = media.dir / f'.upload-{os.urandom(8).hex()}'
         try:
-            f.save(tmp)
+            save_upload(f, tmp)
             added.append(media.add_path(tmp, f.filename or ''))
         except (ValueError, RuntimeError) as exc:
             errors.append(str(exc))
@@ -548,6 +578,8 @@ def export_delete(name):
 def recover():
     """Tidy up after the previous run and restart an export it didn't finish."""
     media.recover()
+    engine.library.clear_sources()  # recordings opened in the voice cutter last time
+    shutil.rmtree(INCOMING, ignore_errors=True)  # uploads cut off by the restart
     for jid in exports.recover(_resolve_media):
         print(f'Restarting an interrupted video export ({jid[:8]}).', flush=True)
 

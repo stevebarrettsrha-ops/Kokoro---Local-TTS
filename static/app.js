@@ -768,11 +768,18 @@ function openVoices() {
   $('#cloneMsg').textContent = ''; $('#cloneMsg').className = 'msg';
   loadCloneMedia();
   $('#voiceDialog').showModal();
+  cutDraw();  // the theme may have changed, or a recording finished opening while the dialog was closed
 }
+$('#cloneClose').onclick = () => $('#voiceDialog').close();
 $('#voiceDialog').addEventListener('close', () => { stopRecording(true); cutStop(); });
+// The opened recording is a temporary file on the studio: remove it when the page goes away.
+window.addEventListener('pagehide', () => {
+  if (cut.src && !cut.busy) fetch(`/api/voices/sources/${cut.src.id}`, {method: 'DELETE', keepalive: true}).catch(() => {});
+});
 
 /* ---------- voice cutter: choose the part of a recording a cloned voice is made from ---------- */
-const cut = {src: null, start: 0, end: 0, drag: null, audio: null, raf: 0};
+// seq: only the newest "open" wins; busy: a voice is being made from cut.src, so leave it alone.
+const cut = {src: null, start: 0, end: 0, drag: null, audio: null, raf: 0, seq: 0, busy: false};
 const cutMsg = (text, kind = '') => { $('#cloneMsg').className = 'msg' + (kind ? ' ' + kind : ''); $('#cloneMsg').textContent = text; };
 async function loadCloneMedia() {
   const sel = $('#cloneMedia');
@@ -784,40 +791,50 @@ async function loadCloneMedia() {
     if (!items.length) sel.options[0].textContent = 'No uploads with sound yet';
   } catch { sel.disabled = true; }
 }
+const dropSource = id => fetch(`/api/voices/sources/${id}`, {method: 'DELETE'}).catch(() => {});
 async function openSource(body, label) {
+  if (cut.busy) return;
+  const seq = ++cut.seq;
   cutStop();
-  const old = cut.src;
   cutMsg(`Opening ${label}…`);
   $('#cloneSubmit').disabled = true;
   try {
     const r = await fetch('/api/voices/sources', {method: 'POST', body});
     const j = await r.json().catch(() => ({error: `Could not open the recording (${r.status})`}));
     if (!r.ok) throw Error(j.error || 'Could not open the recording.');
+    if (seq !== cut.seq || cut.busy) { dropSource(j.source.id); return; }  // something newer was chosen meanwhile
+    const old = cut.src;
     cut.src = j.source; [cut.start, cut.end] = j.source.suggest;
-    if (old) fetch(`/api/voices/sources/${old.id}`, {method: 'DELETE'}).catch(() => {});
+    if (old) dropSource(old.id);
+    if (cut.audio) cut.audio.removeAttribute('src');
     cut.audio = new Audio(`/api/voices/sources/${cut.src.id}/audio`); cut.audio.preload = 'auto';
     $('#cutter').hidden = false;
     $('#cutName').textContent = `${cut.src.name || label} · ${fmtShort(cut.src.seconds)}`;
-    $('#cutStart').max = $('#cutEnd').max = cut.src.seconds;
     cutUpdate();
     cutMsg(cut.src.seconds > 30 ? 'The clearest 20 seconds are selected. Adjust the selection if you like, then create the voice.' : '');
-  } catch (err) { cutMsg(err.message, 'error'); }
-  finally { $('#cloneSubmit').disabled = false; }
+  } catch (err) { if (seq === cut.seq) cutMsg(err.message, 'error'); }
+  finally { if (seq === cut.seq && !cut.busy) $('#cloneSubmit').disabled = false; }
 }
 $('#cloneFile').onchange = e => {
   const f = e.target.files[0]; if (!f) return;
   const body = new FormData(); body.append('file', f, f.name);
+  $('#cloneMedia').value = '';
   openSource(body, f.name);
   e.target.value = '';
 };
+// Arrow keys on a closed list fire "change" for every step: wait until the choice settles.
+let mediaTimer = 0;
 $('#cloneMedia').onchange = e => {
+  clearTimeout(mediaTimer);
   if (!e.target.value) return;
-  const body = new FormData(); body.append('media', e.target.value);
-  openSource(body, e.target.selectedOptions[0].textContent);
-  e.target.value = '';
+  mediaTimer = setTimeout(() => {
+    const sel = $('#cloneMedia'); if (!sel.value) return;
+    const body = new FormData(); body.append('media', sel.value);
+    openSource(body, sel.selectedOptions[0].textContent);
+  }, 600);
 };
 // Record straight from the microphone.
-let recorder = null;
+let recorder = null, micStarting = false;
 function stopRecording(discard = false) {
   if (!recorder) return;
   recorder.discard = discard;
@@ -825,23 +842,28 @@ function stopRecording(discard = false) {
 }
 $('#cloneRec').onclick = async () => {
   if (recorder) { stopRecording(); return; }
+  if (micStarting || cut.busy) return;  // a second click while the browser is still asking for the mic
+  micStarting = true;
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: true}}); }
   catch { cutMsg('The browser could not use a microphone. Allow microphone access, or choose a file instead.', 'error'); return; }
+  finally { micStarting = false; }
+  if (!$('#voiceDialog').open) { stream.getTracks().forEach(t => t.stop()); return; }  // closed while asking: mic off
   const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find(t => window.MediaRecorder?.isTypeSupported(t));
   const mr = new MediaRecorder(stream, type ? {mimeType: type} : undefined), chunks = [], t0 = Date.now();
-  recorder = {mr, discard: false};
-  const btn = $('#cloneRec'); btn.setAttribute('aria-pressed', 'true');
+  const me = recorder = {mr, discard: false};
+  const btn = $('#cloneRec'); btn.setAttribute('aria-pressed', 'true'); btn.textContent = '■ Stop (0:00)';
   const tick = setInterval(() => { btn.textContent = `■ Stop (${fmtShort((Date.now() - t0) / 1000)})`; }, 250);
   mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
   mr.onstop = () => {
     clearInterval(tick); stream.getTracks().forEach(t => t.stop());
     btn.textContent = '● Record'; btn.setAttribute('aria-pressed', 'false');
-    const discard = recorder.discard; recorder = null;
-    if (discard || !chunks.length) return;
+    if (recorder === me) recorder = null;
+    if (me.discard || !chunks.length) { if (me.discard) cutMsg(''); return; }
     const blob = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
     const ext = (mr.mimeType || '').includes('mp4') ? 'm4a' : (mr.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
     const body = new FormData(); body.append('file', blob, `recording.${ext}`);
+    $('#cloneMedia').value = '';
     openSource(body, 'your recording');
   };
   mr.start(500);
@@ -885,9 +907,11 @@ function cutTime(e) {
   return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (cut.src?.seconds || 0);
 }
 $('#cutWave').addEventListener('pointerdown', e => {
-  if (!cut.src) return;
+  if (!cut.src || e.button !== 0) return;
   const cv = $('#cutWave'), t = cutTime(e), px = cut.src.seconds / cv.clientWidth * 8;  // 8 px grab zone
-  cut.drag = Math.abs(t - cut.start) <= px ? {edge: 'start'} : Math.abs(t - cut.end) <= px ? {edge: 'end'}
+  // When the edges are close together, grab the nearer one (past the end means the end).
+  const ds = Math.abs(t - cut.start), de = Math.abs(t - cut.end);
+  cut.drag = Math.min(ds, de) <= px ? {edge: de < ds || (de === ds && t > cut.start) ? 'end' : 'start'}
     : t > cut.start && t < cut.end ? {move: t - cut.start, len: cut.end - cut.start} : {anchor: t};
   if (cut.drag.anchor !== undefined) { cut.prev = [cut.start, cut.end]; cut.start = cut.end = t; }
   cv.setPointerCapture(e.pointerId); cutStop(); cutUpdate();
@@ -911,6 +935,10 @@ const cutDrop = () => {
 };
 $('#cutWave').addEventListener('pointerup', cutDrop);
 $('#cutWave').addEventListener('pointercancel', cutDrop);
+// Enter in a time field applies it (it must never submit or close the dialog).
+for (const id of ['#cutStart', '#cutEnd']) {
+  $(id).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); e.target.dispatchEvent(new Event('change')); } });
+}
 $('#cutStart').addEventListener('change', e => { cut.start = Math.min(+e.target.value || 0, cut.end - 0.5); cutUpdate(); e.target.value = cut.start.toFixed(1); });
 $('#cutEnd').addEventListener('change', e => { cut.end = Math.max(+e.target.value || 0, cut.start + 0.5); cutUpdate(); e.target.value = cut.end.toFixed(1); });
 $('#cutBest').onclick = () => { if (cut.src) { [cut.start, cut.end] = cut.src.suggest; cutUpdate(); } };
@@ -930,7 +958,7 @@ function cutPlay(from) {
     $('#cutPlay').textContent = '❚❚'; $('#cutPlay').setAttribute('aria-label', 'Stop');
     const loop = () => { if (a.paused || a.currentTime >= stopAt) { cutStop(); return; } cutDraw(); cut.raf = requestAnimationFrame(loop); };
     loop();
-  }).catch(() => cutMsg('Could not play the recording.', 'error'));
+  }).catch(err => { if (err.name !== 'AbortError') cutMsg('Could not play the recording.', 'error'); });  // Abort: a newer click
 }
 $('#cutPlay').onclick = () => cutPlay();
 window.addEventListener('resize', () => { if ($('#voiceDialog').open) cutDraw(); });
@@ -967,13 +995,17 @@ $('#cloneForm').addEventListener('submit', async e => {
   if (e.submitter && e.submitter.value === 'close') return;
   e.preventDefault();
   const form = $('#cloneForm'), m = $('#cloneMsg');
-  if (!form.reportValidity()) return;
+  if (cut.busy) return;
+  // Only these need the browser's checks; the times are clamped by the cutter itself.
+  if (!form.elements.name.reportValidity() || !form.elements.consent.reportValidity()) return;
+  if (recorder || micStarting) { cutMsg('Stop the recording first, then choose the part to use.', 'error'); return; }
   if (!cut.src) { cutMsg('Choose a file, record yourself, or pick one of your uploads first.', 'error'); return; }
   if (cut.end - cut.start < 6) { cutMsg('Select at least 6 seconds of speech (10–30 s works best).', 'error'); return; }
   const data = new FormData();
   for (const k of ['name', 'gender', 'consent']) data.append(k, form.elements[k].type === 'checkbox' ? (form.elements[k].checked ? 'yes' : '') : form.elements[k].value);
   data.append('source', cut.src.id); data.append('start', cut.start.toFixed(2)); data.append('end', cut.end.toFixed(2));
   cutStop();
+  cut.busy = true;
   $('#cloneSubmit').disabled = true; m.className = 'msg'; m.textContent = 'Preparing the voice…';
   try {
     const r = await fetch('/api/voices/clone', {method: 'POST', body: data});
@@ -982,12 +1014,12 @@ $('#cloneForm').addEventListener('submit', async e => {
     await refreshCatalog();
     setSelect($('#voice'), j.voice.id); updateVoiceMode(); changed();
     form.reset(); renderCloneList();
-    cut.src = null; cut.audio = null; $('#cutter').hidden = true;
+    cut.src = null; cut.audio = null; $('#cutter').hidden = true; $('#cloneMedia').value = '';
     m.className = 'msg ok';
     m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.'
       : j.cloning.setup === 'installing' ? ' It can speak once the cloning engine finishes installing.' : ' Run ./start.sh online (or ./setup-cloning.sh) to start using it.');
   } catch (err) { m.className = 'msg error'; m.textContent = err.message; }
-  finally { $('#cloneSubmit').disabled = false; }
+  finally { cut.busy = false; $('#cloneSubmit').disabled = false; }
 });
 
 /* ---------- startup ---------- */
