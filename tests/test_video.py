@@ -331,3 +331,19 @@ def test_resume_without_ffmpeg_frees_the_slot(tmp_path, monkeypatch):
     monkeypatch.setattr(vid, 'tools', lambda: {'ffmpeg': None, 'ffprobe': None})
     jobs = vid.ExportJobs(tmp_path / 'exports')
     assert jobs.recover(lambda m: (None, False)) == [] and jobs.get('b' * 32)['status'] == 'failed'
+
+
+def test_text_starting_off_screen_keeps_its_hidden_part(tmp_path, assets):
+    # The editor sends the text area even where it reaches past the frame (it can slide or pop in);
+    # the export places it at the negative offset instead of dropping it.
+    project = vid.sanitize_project({'format': '1:1', 'clips': [{'kind': 'text', 'id': 't', 'start': 0, 'duration': 1,
+                                    'x': -0.05, 'y': 0.4, 'w': 0.5, 'h': 0.1, 'text': {'content': 'x'}, 'anim_in': {'type': 'pop', 'dur': 0.5}}]})
+    png = 'data:image/png;base64,' + base64.b64encode((assets / 'text.png').read_bytes()).decode()
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(project, lambda m: (None, False), {'t': {'png': png, 'x': -180, 'y': 300}}, quality='small')
+    req = json.loads((tmp_path / 'exports' / '.jobs' / job['id'] / 'request.json').read_text())
+    assert req['images']['t']['x'] == -180
+    end = time.time() + 60
+    while jobs.get(job['id'])['status'] == 'running' and time.time() < end:
+        time.sleep(0.2)
+    assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])['error']

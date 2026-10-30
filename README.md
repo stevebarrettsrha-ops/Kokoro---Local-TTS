@@ -46,14 +46,14 @@ This replaces the old approach of pitch-shifting finished audio, which smeared t
 
 The first run downloads everything, so nothing has to download later. It asks before installing anything on the system itself:
 
-- **System programs:** `espeak-ng` (pronounces unusual words), `ffmpeg` (Video tab, MP3 export, recordings) and `curl`. It installs them with `sudo apt` if you say yes.
-- **uv:** fetches Python 3.12 for the studio without touching the system Python (Kokoro 0.9.4 needs Python 3.10–3.12; Ubuntu 26.04 ships 3.14). It's installed into `~/.local/bin` if you say yes.
+- **System programs:** `ffmpeg` (Video tab, MP3 export, recordings), plus `curl` if neither curl nor wget is there to fetch uv. It installs them with `sudo apt` if you say yes; if you say no, it doesn't ask again. (Kokoro brings its own espeak-ng.)
+- **uv:** fetches Python 3.12 for the studio without touching the system Python (Kokoro 0.9.4 needs Python 3.10–3.12; Ubuntu 26.04 ships 3.14). It's installed into `~/.local/bin` if you say yes; its installer also adds that folder to your shell's PATH.
 - **Python packages, the spaCy English model, the Kokoro model and all 28 voices:** about 2.5 GB, into this folder.
-- **Voice cloning (Chatterbox):** about 9 GB more. This installs **in the background** while you already use the studio; progress goes to `data/logs/setup-cloning.log`. Cloned voices start working when it finishes, with no restart. To skip it, start with `SKIP_CLONING=1 ./start.sh`.
+- **Voice cloning (Chatterbox):** about 9 GB more (it's skipped if less than 12 GB is free). This installs **in the background** while you already use the studio; progress goes to `data/logs/setup-cloning.log`. Cloned voices start working when it finishes, with no restart. It keeps going if you stop the studio or close the terminal; to stop it, run `kill -- -$(cat .venv-chatterbox.installing)`. To skip it, start with `SKIP_CLONING=1 ./start.sh`.
 
 Later starts only check that everything is still there, which takes a few seconds. If a download was interrupted, the next start carries on from where it stopped.
 
-To install the system programs yourself instead: `sudo apt install -y curl espeak-ng ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+To install the system programs yourself instead: `sudo apt install -y curl ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`. If you start the studio from a desktop shortcut (no terminal), it can't ask, so run `./start.sh` once in a terminal first.
 
 Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. The model and all voices download during the first `./start.sh`.
 
@@ -206,10 +206,10 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 
 - **Engine not running**: start `./start.sh` and reload the page.
 - **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh`, then `./start.sh`.
-- **`Requires-Python >=3.10,<3.13`**: install Python 3.12 with `uv` as above and rerun `./start.sh`.
+- **`Requires-Python >=3.10,<3.13`** or **"No supported Python interpreter"**: run `./start.sh` in a terminal and answer yes to installing uv, or install it yourself with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `./start.sh` again.
 - **MP3 option greyed out**: install `ffmpeg`.
 - **Port in use**: `KOKORO_PORT=8899 ./start.sh`.
-- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning), `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
+- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning; `true`/`yes` work too), `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
 
 ## Privacy
 

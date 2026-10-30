@@ -394,7 +394,7 @@
   <form method="dialog" class="dialog-body" id="cloneForm">
     <div class="dialog-head">
       <h2 id="vdTitle">Your voices</h2>
-      <button class="icon-btn" value="close" formnovalidate aria-label="Close">×</button>
+      <button type="button" class="icon-btn" id="cloneClose" aria-label="Close">×</button>
     </div>
     <p class="muted">Make a voice from a short recording of a real person. The studio reproduces their sound, accent and way of speaking using Chatterbox, a voice-cloning model that runs on this computer.</p>
     <div class="engine-state" id="cloneEngine"></div>
@@ -418,12 +418,12 @@
       </select>
     </div>
     <div class="cutter" id="cutter" hidden>
-      <div class="cutter-head"><span id="cutName" class="muted"></span><span id="cutLen" class="cut-len"></span></div>
-      <canvas id="cutWave" tabindex="-1" aria-label="Waveform of the recording. Drag to choose the part to use; drag the edges to adjust."></canvas>
+      <div class="cutter-head"><span id="cutName" class="muted"></span><span id="cutLen" class="cut-len" aria-live="polite"></span></div>
+      <canvas id="cutWave" role="img" aria-label="Waveform of the recording. Drag to choose the part to use; drag the edges to adjust."></canvas>
       <div class="cutter-bar">
         <button type="button" class="icon-btn" id="cutPlay" aria-label="Play the selected part" title="Play the selected part">▷</button>
-        <label class="mini cut-time">From <input class="input" type="number" id="cutStart" min="0" step="0.1" inputmode="decimal"> s</label>
-        <label class="mini cut-time">To <input class="input" type="number" id="cutEnd" min="0" step="0.1" inputmode="decimal"> s</label>
+        <label class="mini cut-time">From <input class="input" type="number" id="cutStart" min="0" step="any" inputmode="decimal"> s</label>
+        <label class="mini cut-time">To <input class="input" type="number" id="cutEnd" min="0" step="any" inputmode="decimal"> s</label>
         <button type="button" class="link-btn" id="cutBest" title="Select the 20 seconds with the most clear speech">Best part</button>
         <button type="button" class="link-btn" id="cutAll">Whole recording</button>
       </div>
@@ -437,7 +437,7 @@
     <label class="consent"><input type="checkbox" name="consent" value="yes" required>
       This is my voice, or the speaker has given me permission to use their voice this way.</label>
     <div class="dialog-foot">
-      <span class="msg" id="cloneMsg"></span>
+      <span class="msg" id="cloneMsg" role="status" aria-live="polite"></span>
       <button class="render-btn small" id="cloneSubmit" value="default">Create voice</button>
     </div>
   </form>

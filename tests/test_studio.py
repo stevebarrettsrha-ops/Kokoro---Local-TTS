@@ -484,12 +484,68 @@ def test_clone_worker_waits_for_background_setup(tmp_path):
     w = CloneWorker(root=tmp_path)
     assert w.available() and w.status()['setup'] is None
     lock = tmp_path / '.venv-chatterbox.installing'
-    lock.write_text(str(os.getpid()))  # a live process: setup still running
-    assert not w.available() and w.status()['setup'] == 'installing'
-    with pytest.raises(RuntimeError, match='still being installed'):
-        w.speak('hi', tmp_path / 'x.wav')
+    setup = subprocess.Popen(['bash', '-c', 'sleep 30', 'setup-cloning.sh'])  # stands in for the running setup
+    try:
+        lock.write_text(str(setup.pid))
+        assert not w.available() and w.status()['setup'] == 'installing'
+        with pytest.raises(RuntimeError, match='still being installed'):
+            w.speak('hi', tmp_path / 'x.wav')
+    finally:
+        setup.kill(); setup.wait()
+    lock.write_text(str(os.getpid()))  # after a reboot the id belongs to some other program
+    assert not w.available() and w.status()['setup'] == 'interrupted'
     proc = subprocess.Popen(['true']); proc.wait()
     lock.write_text(str(proc.pid))  # setup stopped part-way
     assert not w.available() and w.status()['setup'] == 'interrupted'
     lock.unlink()
     assert w.available()
+
+
+def test_best_part_prefers_speech_over_music_and_nan_is_safe(tmp_path):
+    from studio.cloning import VoiceLibrary, best_part
+    sr = 24000
+    t = np.arange(sr * 30) / sr
+    music = (0.25 * (np.sin(2 * np.pi * 220 * t) + 0.5 * np.sin(2 * np.pi * 330 * t))).astype(np.float32)  # steady bed
+    y = np.concatenate([music, _speechy(30)])
+    a, b = best_part(y)
+    assert a >= 29.5, (a, b)  # the speech, not the music intro
+    a, b = best_part(np.concatenate([_speechy(30), music]))
+    assert b <= 30.5, (a, b)  # ... nor the music outro
+    # A float file with NaN/inf samples opens with a valid (finite) waveform.
+    bad = _speechy(12)
+    bad[100:200] = np.nan
+    bad[300] = np.inf
+    src = tmp_path / 'nan.wav'
+    sf.write(src, bad, sr, subtype='FLOAT')
+    opened = VoiceLibrary(tmp_path / 'v').open_source(src, 'nan.wav')
+    json.dumps(opened, allow_nan=False)
+
+
+def test_two_voices_with_one_name_at_once(tmp_path):
+    import threading
+    from studio.cloning import VoiceLibrary
+    lib = VoiceLibrary(tmp_path / 'voices')
+    out = []
+    threads = [threading.Thread(target=lambda: out.append(lib.add(_wav_bytes(_speechy(12)), 'd.wav', 'Dad')['id'])) for _ in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(set(out)) == 4 and len(lib.list()) == 4
+
+
+def test_real_bugs_are_not_reported_as_bad_input(monkeypatch):
+    import app as server
+    monkeypatch.setattr(server.media, 'list', lambda: (_ for _ in ()).throw(ValueError('too many values to unpack')))
+    monkeypatch.setitem(server.app.config, 'PROPAGATE_EXCEPTIONS', False)
+    r = server.app.test_client().get('/api/media')
+    assert r.status_code == 500  # a bug, logged as one, not a misleading 400
+
+
+def test_every_ffmpeg_call_is_detached_from_the_terminal():
+    # A child that reads the studio's terminal freezes a backgrounded studio (SIGTTOU) and eats keys.
+    import ast
+    for f in Path(__file__).resolve().parents[1].glob('studio/*.py'):
+        for node in ast.walk(ast.parse(f.read_text())):
+            if isinstance(node, ast.Call) and getattr(node.func, 'attr', '') in ('run', 'Popen') \
+                    and getattr(node.func.value, 'id', '') == 'subprocess':
+                kw = {k.arg for k in node.keywords}
+                assert kw & {'stdin', 'input'}, f'{f.name}:{node.lineno} has no stdin='

@@ -12,6 +12,8 @@ export HF_HUB_OFFLINE=0
 mkdir -p "$HF_HOME" voices
 lock=.venv-chatterbox.installing
 ready=.venv-chatterbox/.ready
+echo "=== Voice cloning setup, $(date) ==="
+trap 'echo "Voice cloning setup FAILED (see above). It carries on the next time ./start.sh runs online, or run ./setup-cloning.sh." >&2' ERR
 weights_cached() {
   .venv-chatterbox/bin/python - >/dev/null 2>&1 <<'PY'
 from huggingface_hub import hf_hub_download
@@ -27,20 +29,21 @@ if [ -x .venv-chatterbox/bin/python ] && { [ -f "$ready" ] || .venv-chatterbox/b
   exit 0
 fi
 
-# Only one setup at a time (start.sh may launch it while you run it by hand).
-if [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; then
-  echo "Voice cloning is already being set up (process $(cat "$lock")). Progress: data/logs/setup-cloning.log"
+# Only one setup at a time (start.sh may launch it while you run it by hand). The id in the
+# lock only counts if that process really is this script: after a reboot it may be another program.
+pid="$(cat "$lock" 2>/dev/null || true)"
+if [ -n "$pid" ] && grep -qa setup-cloning "/proc/$pid/cmdline" 2>/dev/null; then
+  echo "Voice cloning is already being set up (process $pid). Progress: data/logs/setup-cloning.log"
   exit 0
+fi
+if ! command -v uv >/dev/null 2>&1; then
+  echo 'ERROR: uv is required (./start.sh installs it), then rerun ./setup-cloning.sh' >&2
+  exit 1
 fi
 # The studio treats cloning as unavailable while this file exists, so a half-installed
 # environment is never used. If setup stops part-way, the file stays and the next run resumes.
 echo $$ > "$lock"
 rm -f "$ready"
-
-if ! command -v uv >/dev/null 2>&1; then
-  echo 'ERROR: uv is required (./start.sh installs it), then rerun ./setup-cloning.sh' >&2
-  exit 1
-fi
 if [ ! -x .venv-chatterbox/bin/python ]; then
   echo 'Creating the voice-cloning environment (.venv-chatterbox, Python 3.11)...'
   uv venv --python 3.11 .venv-chatterbox

@@ -45,6 +45,10 @@ MAX_PROJECT_SECONDS = 60 * 60
 PROXY_SLOTS = threading.BoundedSemaphore(2)  # preview conversions at once (each is a full ffmpeg encode)
 
 
+class InputError(ValueError):
+    """A request the user can fix (shown to them as is); other ValueErrors are bugs."""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -79,7 +83,7 @@ def probe(path):
     if not exe:
         raise RuntimeError('ffprobe (part of ffmpeg) is required for the video editor: sudo apt install ffmpeg')
     proc = subprocess.run([exe, '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', str(path)],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:
         raise ValueError('That file could not be read as audio, video or an image.')
     data = json.loads(proc.stdout or '{}')
@@ -196,7 +200,7 @@ class MediaLibrary:
             fixed = path.with_name(f'{mid}.fixed.{ext}')
             try:
                 subprocess.run([tools()['ffmpeg'] or 'ffmpeg', '-y', '-loglevel', 'error', '-i', str(path), '-c', 'copy', str(fixed)],
-                               capture_output=True, timeout=600)
+                               capture_output=True, timeout=600, stdin=subprocess.DEVNULL)
                 if fixed.is_file() and fixed.stat().st_size:
                     fixed.replace(path)
                     info = probe(path)
@@ -233,7 +237,7 @@ class MediaLibrary:
         src = self.dir / meta['file']
         seek = ['-ss', f'{min(1.0, (meta.get("duration") or 0) / 3):.2f}'] if meta['kind'] == 'video' else []
         subprocess.run([exe, '-y', '-loglevel', 'error', *seek, '-i', str(src), '-frames:v', '1',
-                        '-vf', 'scale=320:-2', str(self.dir / f'{meta["id"]}.thumb.jpg')], capture_output=True, timeout=60)
+                        '-vf', 'scale=320:-2', str(self.dir / f'{meta["id"]}.thumb.jpg')], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
 
     def _make_proxy(self, mid):
         """Browser-playable preview copy (e.g. for iPhone HEVC .mov). Export still uses the original."""
@@ -247,7 +251,7 @@ class MediaLibrary:
                     proc = subprocess.run([exe, '-y', '-loglevel', 'error', '-i', str(self.dir / meta['file']),
                                            '-vf', "scale=-2:'min(720,ih)'", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
                                            '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', str(out)],
-                                          capture_output=True, timeout=3600)
+                                          capture_output=True, timeout=3600, stdin=subprocess.DEVNULL)
                     status = 'ready' if proc.returncode == 0 and out.is_file() else 'failed'
                 except (OSError, subprocess.SubprocessError):
                     status = 'failed'
@@ -317,7 +321,7 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
     if not isinstance(clips, list):
         clips = []
     if len(clips) > MAX_CLIPS:
-        raise ValueError(f'A video can have at most {MAX_CLIPS} clips (this one has {len(clips)}). '
+        raise InputError(f'A video can have at most {MAX_CLIPS} clips (this one has {len(clips)}). '
                          'Split it into two videos, or use fewer, longer captions.')
     for c in clips:
         if not isinstance(c, dict) or c.get('kind') not in KINDS:
@@ -698,7 +702,7 @@ class ExportJobs:
     def encoder(self):
         if self._encoder is None:
             exe = tools()['ffmpeg']
-            out = subprocess.run([exe, '-hide_banner', '-encoders'], capture_output=True, text=True).stdout if exe else ''
+            out = subprocess.run([exe, '-hide_banner', '-encoders'], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout if exe else ''
             self._encoder = 'libx264' if 'libx264' in out else 'mpeg4'
         return self._encoder
 
@@ -733,10 +737,11 @@ class ExportJobs:
                 entry = {'file': f'{cid}.png'}
                 if isinstance(data, dict):
                     w, h = png_size(raw)
-                    if not (0 < w <= 2 * project['width'] and 0 < h <= 2 * project['height']):
+                    # The editor's text area may reach one frame beyond each edge (static/video.js textArea).
+                    if not (0 < w <= 3 * project['width'] and 0 < h <= 3 * project['height']):
                         continue
-                    entry.update(x=int(_num(data.get('x'), -project['width'], project['width'], 0)),
-                                 y=int(_num(data.get('y'), -project['height'], project['height'], 0)), w=w, h=h)
+                    entry.update(x=int(_num(data.get('x'), -project['width'], 2 * project['width'], 0)),
+                                 y=int(_num(data.get('y'), -project['height'], 2 * project['height'], 0)), w=w, h=h)
                 (folder / entry['file']).write_bytes(raw)
                 images[str(cid)] = entry
             slug = re.sub(r'[^A-Za-z0-9]+', '-', project['name']).strip('-').lower()[:40] or 'video'
@@ -780,7 +785,7 @@ class ExportJobs:
         """ffmpeg option that reads the filter graph from a file (renamed in ffmpeg 7.1)."""
         if getattr(self, '_graph_option', None) is None:
             exe = tools()['ffmpeg']
-            text = subprocess.run([exe, '-hide_banner', '-h', 'full'], capture_output=True, text=True).stdout if exe else ''
+            text = subprocess.run([exe, '-hide_banner', '-h', 'full'], capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout if exe else ''
             self._graph_option = '-filter_complex_script' if '-filter_complex_script' in text else '-/filter_complex'
         return self._graph_option
 
@@ -843,7 +848,7 @@ class ExportJobs:
         try:
             # stderr goes to a file: a pipe nobody reads until the end can fill up and freeze ffmpeg.
             errlog = tempfile.TemporaryFile('w+', encoding='utf-8', errors='replace')
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errlog, text=True, stdin=subprocess.DEVNULL)
             job['proc'] = proc
             if job['status'] == 'cancelled':  # cancelled before ffmpeg had started
                 proc.kill()

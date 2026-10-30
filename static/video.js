@@ -844,7 +844,19 @@ function select_(id) {
 }
 const num = (v, d = 2) => (+v).toFixed(d).replace(/\.?0+$/, '') || '0';
 function field(label, html, cls = '') { return `<label class="mini ${cls}">${label}${html}</label>`; }
+// Rebuilding the panel (after an edit) must not drop keyboard focus: remember which control
+// had it by its data-* attributes and focus the new one.
+function focusKey(el) {
+  if (!el || !$('#veProps').contains(el)) return null;
+  const attrs = [...el.attributes].filter(a => a.name.startsWith('data-')).map(a => `[${a.name}="${CSS.escape(a.value)}"]`).join('');
+  return attrs ? el.tagName.toLowerCase() + attrs : null;
+}
 function renderProps() {
+  const key = focusKey(document.activeElement);
+  renderPropsInner();
+  if (key) $('#veProps').querySelector(key)?.focus();
+}
+function renderPropsInner() {
   const box = $('#veProps'), c = clipById(st.sel);
   if (!P()) { box.innerHTML = ''; return; }
   if (!c) {
@@ -1190,26 +1202,25 @@ async function openProjectsDialog() {
 
 /* ---------------------------------------------------------------- export */
 // Same box as text_area() in studio/video.py: the text plus room for glows and shadows.
+// Unlike the Python version (which crops a frame-sized picture), the area may reach a frame
+// beyond each edge: text that starts off screen and slides or pops in must still be drawn.
 function textArea(c, W, H) {
   const even = n => { let r = Math.round(n); if (r - n === 0.5 && r % 2) r--; r = Math.max(2, r); return r + (r % 2); };  // Python round()
   const m = Math.trunc(c.text.size * Math.min(W, H) + 0.25 * even(c.h * H));
-  const x0 = Math.max(0, Math.trunc(c.x * W) - m), y0 = Math.max(0, Math.trunc(c.y * H) - m);
-  const x1 = Math.min(W, Math.trunc((c.x + c.w) * W) + m), y1 = Math.min(H, Math.trunc((c.y + c.h) * H) + m);
+  const x0 = Math.max(-W, Math.trunc(c.x * W) - m), y0 = Math.max(-H, Math.trunc(c.y * H) - m);
+  const x1 = Math.min(2 * W, Math.trunc((c.x + c.w) * W) + m), y1 = Math.min(2 * H, Math.trunc((c.y + c.h) * H) + m);
   return [x0, y0, Math.max(2, Math.floor((x1 - x0) / 2) * 2), Math.max(2, Math.floor((y1 - y0) / 2) * 2)];
 }
 // One small PNG per text clip, cropped to its area. Full-frame images made exports with
 // hundreds of captions slow and memory-hungry. Yields to the page so it stays responsive.
-async function renderTextImages(progress) {
-  const out = {}, W = P().width, H = P().height;
-  const off = document.createElement('canvas'); off.width = W; off.height = H;
-  const ctx = off.getContext('2d');
+async function renderTextImages(project, progress) {
+  const out = {}, W = project.width, H = project.height;
   const crop = document.createElement('canvas'), cctx = crop.getContext('2d');
-  const texts = P().clips.filter(c => c.kind === 'text');
+  const texts = project.clips.filter(c => c.kind === 'text');
   for (const [i, c] of texts.entries()) {
-    ctx.clearRect(0, 0, W, H); drawText(ctx, c, W, H);
     const [x, y, w, h] = textArea(c, W, H);
-    crop.width = w; crop.height = h;
-    cctx.clearRect(0, 0, w, h); cctx.drawImage(off, x, y, w, h, 0, 0, w, h);
+    crop.width = w; crop.height = h;  // also resets the transform
+    cctx.clearRect(0, 0, w, h); cctx.translate(-x, -y); drawText(cctx, c, W, H);  // drawn in place, even off screen
     out[c.id] = {png: crop.toDataURL('image/png'), x, y};
     if (i % 20 === 19) { progress?.(i + 1, texts.length); await new Promise(r => setTimeout(r)); }
   }
@@ -1234,10 +1245,11 @@ $('#veExportForm').addEventListener('submit', async e => {
   const form = new FormData($('#veExportForm'));
   $('#veExGo').disabled = true; $('#veExMsg').className = 'msg'; $('#veExMsg').textContent = 'Preparing…';
   try {
+    const project = JSON.parse(snapshot());  // this exact state, even if the editor changes meanwhile
     await document.fonts?.ready;
-    const textImages = await renderTextImages((n, total) => { $('#veExMsg').textContent = `Preparing text ${n} of ${total}…`; });
-    const body = {project: P(), text_images: textImages, quality: form.get('quality'), lufs: form.get('lufs')};
-    const r = await jsonPost(`/api/video/projects/${P().id}/export`, body);
+    const textImages = await renderTextImages(project, (n, total) => { $('#veExMsg').textContent = `Preparing text ${n} of ${total}…`; });
+    const body = {project, text_images: textImages, quality: form.get('quality'), lufs: form.get('lufs')};
+    const r = await jsonPost(`/api/video/projects/${project.id}/export`, body);
     st.job = r.job.id; st.jobFails = 0; st.dirty = false; $('#veSaved').textContent = 'Saved';
     $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExMsg').textContent = 'Exporting…';
     pollJob();
