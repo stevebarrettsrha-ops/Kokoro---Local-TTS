@@ -13,8 +13,9 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } },
 };
-const fmt = s => { s = Math.max(0, s || 0); const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, '0')}`; };
+const fmt = s => { s = Math.round(Math.max(0, s || 0) * 10) / 10; const m = Math.floor(s / 60); return `${m}:${(s - m * 60).toFixed(1).padStart(4, '0')}`; };
 
+const MAX_CLIPS = 600;  // same as studio/video.py
 const FORMATS = {'16:9': [1920, 1080], '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350]};
 const LANES = [
   {id: 'T1', label: 'Text', kinds: ['text', 'image', 'video', 'color']},
@@ -133,7 +134,11 @@ async function loadLibrary() {
 async function openProject(id) {
   stop();
   let project = null;
-  if (id) { try { project = (await api(`/api/video/projects/${id}`)).project; } catch { project = null; } }
+  if (id) {
+    // Only a project that no longer exists is replaced by a new one; any other error (studio busy or
+    // restarting) is reported, so the user's work never seems to vanish behind a blank project.
+    try { project = (await api(`/api/video/projects/${id}`)).project; } catch (err) { if (err.status !== 404) throw err; }
+  }
   if (!project) project = (await jsonPost('/api/video/projects', {name: 'Untitled video', format: '16:9'})).project;
   clearTimeout(st.saveTimer);
   st.project = project; st.sel = null; st.time = 0; st.undo = []; st.redo = []; st.dirty = false;
@@ -246,6 +251,10 @@ async function addCaptions(clip) {
   try { cues = (await api(`/api/recordings/${rid}/cues`)).cues; } catch (err) { K.toast('No captions for this take: ' + err.message); return; }
   if (!cues.length) { K.toast('This take has no captions.'); return; }
   const preset = TEXT_PRESETS.find(p => p.name === 'Caption');
+  if (P().clips.length + cues.length > MAX_CLIPS) {
+    K.toast(`That would add ${cues.length} captions; a video can hold ${MAX_CLIPS} clips. Split the voice-over into shorter takes.`);
+    return;
+  }
   commit(p => {
     for (const cue of cues) {
       const start = clip.start + cue.start - clip.in;
@@ -303,6 +312,7 @@ function renderBin() {
 function renderPresets() {
   $('#veTextPresets').innerHTML = TEXT_PRESETS.map((p, i) => `<button class="ve-preset text" data-tp="${i}" style="font-family:${FONTS[p.text.font || 'sans']};font-weight:${p.text.weight};${p.text.italic ? 'font-style:italic;' : ''}">${esc(p.name)}</button>`).join('');
   $$('[data-tp]').forEach(b => b.onclick = () => {
+    if (!P()) return;
     const p = TEXT_PRESETS[+b.dataset.tp], [x, y, w, h] = p.box;
     const lane = freeLane(['T1', 'V3', 'V2'], st.time, 4) || 'T1';
     addClip({kind: 'text', lane, start: st.time, duration: 4, x, y, w, h, name: p.name, text: textDefaults(p.text),
@@ -310,6 +320,7 @@ function renderPresets() {
   });
   $('#veShapePresets').innerHTML = SHAPE_PRESETS.map((p, i) => `<button class="ve-preset shape" data-sp="${i}"><i style="background:${p.color.slice(0, 7)};opacity:${parseInt(p.color.slice(7, 9) || 'ff', 16) / 255}"></i>${esc(p.name)}</button>`).join('');
   $$('[data-sp]').forEach(b => b.onclick = () => {
+    if (!P()) return;
     const p = SHAPE_PRESETS[+b.dataset.sp], dur = Math.max(4, duration() - st.time) || 4;
     const mk = box => ({id: uid(), kind: 'color', color: p.color, lane: p.lane, start: st.time, duration: dur, x: box[0], y: box[1], w: box[2], h: box[3],
       fit: 'cover', opacity: 1, fade_in: 0, fade_out: 0, zoom: 0, volume: 1, muted: false, in: 0, name: p.name});
@@ -357,6 +368,7 @@ function pollProxies() {
   }, 2500);
 }
 $('#veFiles').onchange = e => { upload(e.target.files); e.target.value = ''; };
+$('#veDrop').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#veFiles').click(); } });
 const drop = $('#veDrop');
 ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); drop.classList.add('over'); } }));
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('over')));
@@ -527,7 +539,7 @@ function drawMedia(ctx, src, c, W, H, t) {
   ctx.save();
   ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip();
   const zoom = c.kind === 'image' && c.zoom > 0 ? 1 + c.zoom * clamp((t - c.start) / c.duration, 0, 1) : 1;
-  const cover = c.fit === 'cover' || zoom > 1;
+  const cover = c.fit === 'cover' || (c.kind === 'image' && c.zoom > 0);
   const scale = (cover ? Math.max(bw / sw, bh / sh) : Math.min(bw / sw, bh / sh)) * zoom;
   const dw = sw * scale, dh = sh * scale;
   ctx.drawImage(src, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
@@ -545,7 +557,14 @@ function draw() {
     const m = motionAt(c, plan[c.id], t);
     ctx.save();
     ctx.translate(m.dx * W, m.dy * H);
-    if (m.sc !== 1) { const cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H; ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.translate(-cx, -cy); }
+    if (m.sc !== 1) {
+      let cx = (c.x + c.w / 2) * W, cy = (c.y + c.h / 2) * H;
+      if (c.kind === 'text') {  // the export scales text around the centre of its text area
+        const [ax, ay, aw, ah] = textArea(c, P().width, P().height);
+        cx = (ax + aw / 2) / P().width * W; cy = (ay + ah / 2) / P().height * H;
+      }
+      ctx.translate(cx, cy); ctx.scale(m.sc, m.sc); ctx.translate(-cx, -cy);
+    }
     ctx.globalAlpha = c.opacity * (t < c.start + c.duration ? fadeFactor(c, t) : (c.fade_out > 0 ? 0 : 1)) * m.a;
     if (c.kind === 'color') {
       ctx.fillStyle = hexToRgba(c.color); ctx.fillRect(c.x * W, c.y * H, c.w * W, c.h * H);
@@ -621,14 +640,17 @@ function renderTimeline() {
   $('#veLanes').style.width = width + 'px';
   $('#veLanes').innerHTML = LANES.map(l => `<div class="ve-lane ${l.id[0] === 'A' ? 'audio' : ''}" data-lane="${l.id}">${
     P().clips.filter(c => c.lane === l.id).map(clipHtml).join('')}${l.id[0] === 'A' ? '' : junctions(l.id)}</div>`).join('');
-  $$('#veLanes .ve-tr').forEach(b => b.addEventListener('pointerdown', e => {
+  $$('#veLanes .ve-tr').forEach(b => b.addEventListener('click', e => {
     e.stopPropagation();
     const c = clipById(b.dataset.tr); if (!c) return;
     if (!c.transition || c.transition.type === 'none') commit(() => { c.transition = {type: 'crossfade', dur: 0.6}; });
     select_(c.id);
     $('#veProps [data-trtype]')?.focus();
   }));
-  $$('#veLanes .ve-clip').forEach(el => el.addEventListener('pointerdown', clipPointerDown));
+  $$('#veLanes .ve-clip').forEach(el => {
+    el.addEventListener('pointerdown', clipPointerDown);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); select_(el.dataset.clip); } });
+  });
   $$('#veLanes .ve-lane').forEach(el => {
     el.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('text/x-ve')) { e.preventDefault(); el.classList.add('over'); } });
     el.addEventListener('dragleave', () => el.classList.remove('over'));
@@ -661,7 +683,7 @@ function clipHtml(c) {
     }
   }
   const fades = (c.fade_in ? `<b class="fi" style="width:${c.fade_in * st.pps}px"></b>` : '') + (c.fade_out ? `<b class="fo" style="width:${c.fade_out * st.pps}px"></b>` : '');
-  return `<div class="ve-clip ${c.kind}${c.media?.startsWith('take:') ? ' take' : ''}${st.sel === c.id ? ' sel' : ''}" data-clip="${c.id}" style="left:${left}px;width:${w}px;${bg}" title="${esc(clipName(c))} · ${c.duration.toFixed(1)}s">
+  return `<div tabindex="0" role="button" aria-label="${esc(clipName(c))}, ${c.kind}, ${c.duration.toFixed(1)} seconds" class="ve-clip ${c.kind}${c.media?.startsWith('take:') ? ' take' : ''}${st.sel === c.id ? ' sel' : ''}" data-clip="${c.id}" style="left:${left}px;width:${w}px;${bg}" title="${esc(clipName(c))} · ${c.duration.toFixed(1)}s">
     ${inner}${fades}<span class="lbl">${c.muted ? '🔇 ' : ''}${esc(clipName(c))}</span><s class="eh l"></s><s class="eh r"></s></div>`;
 }
 function xToTime(clientX) {
@@ -845,7 +867,7 @@ function renderProps() {
     html += `<label class="mini">Text<textarea class="input ve-text" rows="3" data-t="content">${esc(t.content)}</textarea></label>
       <div class="row two">${field('Font', `<select class="input" data-t="font">${Object.keys(FONTS).map(f => `<option value="${f}" ${t.font === f ? 'selected' : ''}>${f[0].toUpperCase() + f.slice(1)}</option>`).join('')}</select>`)}
       ${field('Weight', `<select class="input" data-t="weight">${[[400, 'Regular'], [500, 'Medium'], [700, 'Bold'], [800, 'Extra bold'], [900, 'Black']].map(([v, n]) => `<option value="${v}" ${t.weight === v ? 'selected' : ''}>${n}</option>`).join('')}</select>`)}</div>
-      <div class="slider"><label>Size</label><output>${Math.round(t.size * 1000) / 10}</output><input type="range" min="0.02" max="0.3" step="0.005" value="${t.size}" data-t="size"></div>
+      <div class="slider"><label>Size</label><output>${Math.round(t.size * 1000) / 10}</output><input type="range" min="0.02" max="0.3" step="0.005" value="${t.size}" aria-label="Size" data-t="size"></div>
       <div class="row two">${field('Colour', `<input type="color" class="ve-color" value="${t.color.slice(0, 7)}" data-t="color">`)}
 </div>
       <div class="ve-toggles">
@@ -861,14 +883,14 @@ function renderProps() {
   }
   if (c.kind === 'color') {
     html += `<div class="row two">${field('Colour', `<input type="color" class="ve-color" value="${c.color.slice(0, 7)}" data-color>`)}
-      <div class="slider"><label>See-through</label><output>${Math.round((1 - parseInt(c.color.slice(7, 9) || 'ff', 16) / 255) * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${1 - parseInt(c.color.slice(7, 9) || 'ff', 16) / 255}" data-alpha></div></div>`;
+      <div class="slider"><label>See-through</label><output>${Math.round((1 - parseInt(c.color.slice(7, 9) || 'ff', 16) / 255) * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${1 - parseInt(c.color.slice(7, 9) || 'ff', 16) / 255}" aria-label="See-through" data-alpha></div></div>`;
   }
   if (visual) {
     html += `<h3>Position</h3><div class="row four">${['x', 'y', 'w', 'h'].map(k => field({x: 'Left', y: 'Top', w: 'Width', h: 'Height'}[k] + ' %', `<input class="input mono" type="number" step="1" data-pos="${k}">`)).join('')}</div>
       <div class="row ve-btnrow"><button type="button" class="btn ghost" data-act="fill">Fill frame</button><button type="button" class="btn ghost" data-act="center">Center</button>
       ${c.kind === 'video' || c.kind === 'image' ? `<span class="seg-toggle"><button type="button" data-fit="cover" aria-pressed="${c.fit === 'cover'}" title="Fill the box, cropping edges">Crop</button><button type="button" data-fit="contain" aria-pressed="${c.fit === 'contain'}" title="Show the whole picture">Fit</button></span>` : ''}</div>
-      <div class="slider"><label>Opacity</label><output>${Math.round(c.opacity * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${c.opacity}" data-k="opacity"></div>`;
-    if (c.kind === 'image') html += `<div class="slider"><label>Slow zoom (Ken Burns)</label><output>${Math.round(c.zoom * 100)}%</output><input type="range" min="0" max="0.4" step="0.01" value="${c.zoom}" data-k="zoom"></div>`;
+      <div class="slider"><label>Opacity</label><output>${Math.round(c.opacity * 100)}%</output><input type="range" min="0" max="1" step="0.01" value="${c.opacity}" aria-label="Opacity" data-k="opacity"></div>`;
+    if (c.kind === 'image') html += `<div class="slider"><label>Slow zoom (Ken Burns)</label><output>${Math.round(c.zoom * 100)}%</output><input type="range" min="0" max="0.4" step="0.01" value="${c.zoom}" aria-label="Slow zoom (Ken Burns)" data-k="zoom"></div>`;
     html += `<div class="row two"><label class="mini">Layer<select class="input" data-lane>${LANES.filter(l => l.kinds.includes(c.kind)).map(l => `<option value="${l.id}" ${c.lane === l.id ? 'selected' : ''}>${l.label}</option>`).join('')}</select></label></div>`;
   } else {
     html += `<div class="row two"><label class="mini">Track<select class="input" data-lane>${LANES.filter(l => l.kinds.includes('audio')).map(l => `<option value="${l.id}" ${c.lane === l.id ? 'selected' : ''}>${l.label}</option>`).join('')}</select></label></div>`;
@@ -886,7 +908,7 @@ function renderProps() {
   }
   html += `<h3>Fades</h3><div class="row two">${field('Fade in (s)', `<input class="input mono" type="number" step="0.1" min="0" max="10" data-k="fade_in">`)}${field('Fade out (s)', `<input class="input mono" type="number" step="0.1" min="0" max="10" data-k="fade_out">`)}</div>`;
   if (media) {
-    html += `<h3>Sound</h3><div class="slider"><label>Volume</label><output>${Math.round(c.volume * 100)}%</output><input type="range" min="0" max="2" step="0.01" value="${c.volume}" data-k="volume"></div>
+    html += `<h3>Sound</h3><div class="slider"><label>Volume</label><output>${Math.round(c.volume * 100)}%</output><input type="range" min="0" max="2" step="0.01" value="${c.volume}" aria-label="Volume" data-k="volume"></div>
       <div class="checks small"><label><input type="checkbox" data-muted ${c.muted ? 'checked' : ''}> Mute</label></div>
       ${field('Starts from (s into the file)', `<input class="input mono" type="number" step="0.1" min="0" data-k="in">`)}`;
   }
@@ -920,7 +942,7 @@ function bindProps(c) {
     else el.addEventListener('change', () => commit(() => {
       let v = Math.max(0, +el.value || 0);
       if (k === 'duration') v = clamp(v, 0.1, sourceDuration(c) - c.in);
-      if (k === 'in') v = clamp(v, 0, sourceDuration(c) - 0.1);
+      if (k === 'in') { v = clamp(v, 0, sourceDuration(c) - 0.1); c.duration = Math.min(c.duration, sourceDuration(c) - v); }
       c[k] = v;
     }));
   });
@@ -932,7 +954,8 @@ function bindProps(c) {
       el.addEventListener('input', () => { if (!pending) pending = snapshot(); c.text.content = el.value; draw(); renderTimeline(); scheduleSave(); });
       el.addEventListener('change', () => { if (pending) { st.undo.push(pending); st.redo = []; pending = null; } });
     } else if (k === 'bgcolor') el.addEventListener('input', () => { c.text.bg = el.value + 'b3'; box.querySelector('[data-tbg]').checked = true; draw(); scheduleSave(); });
-    else el.addEventListener(el.type === 'color' ? 'input' : 'change', () => { c.text[k] = k === 'weight' ? +el.value : el.value; draw(); renderTimeline(); scheduleSave(); });
+    else if (el.type === 'color') live(el, () => { c.text[k] = el.value; draw(); });  // one undo step per colour pick
+    else el.addEventListener('change', () => commit(() => { c.text[k] = k === 'weight' ? +el.value : el.value; }));
   });
   box.querySelector('[data-tbg]')?.addEventListener('change', e => commit(() => { c.text.bg = e.target.checked ? box.querySelector('[data-t=bgcolor]').value + 'b3' : ''; }));
   box.querySelectorAll('[data-fxprev]').forEach(cv => {
@@ -949,12 +972,12 @@ function bindProps(c) {
     c.text.effect = el.dataset.fx; c.text.shadow = false; c.text.outline = false;
     if (el.dataset.fx === 'background' && !c.text.bg) c.text.fx_color = c.text.fx_color && c.text.fx_color !== '#000000' ? c.text.fx_color : '#000000b3';
   }));
-  box.querySelector('[data-fxcolor]')?.addEventListener('input', e => {
-    c.text.fx_color = e.target.value + (effectOf(c.text) === 'background' ? 'b3' : ''); draw(); scheduleSave();
-  });
+  const fxc = box.querySelector('[data-fxcolor]');
+  if (fxc) live(fxc, () => { c.text.fx_color = fxc.value + (effectOf(c.text) === 'background' ? 'b3' : ''); draw(); });
   box.querySelectorAll('[data-tf]').forEach(el => el.addEventListener('change', () => commit(() => { c.text[el.dataset.tf] = el.checked; })));
   box.querySelectorAll('[data-align]').forEach(el => el.onclick = () => commit(() => { c.text.align = el.dataset.align; }));
-  box.querySelector('[data-color]')?.addEventListener('input', e => { c.color = e.target.value + (c.color.slice(7, 9) || 'ff'); draw(); renderTimeline(); scheduleSave(); });
+  const colorEl = box.querySelector('[data-color]');
+  if (colorEl) live(colorEl, () => { c.color = colorEl.value + (c.color.slice(7, 9) || 'ff'); draw(); });
   const alpha = box.querySelector('[data-alpha]');
   if (alpha) live(alpha, () => { c.color = c.color.slice(0, 7) + Math.round((1 - alpha.value) * 255).toString(16).padStart(2, '0'); });
   box.querySelectorAll('[data-fit]').forEach(el => el.onclick = () => commit(() => { c.fit = el.dataset.fit; }));
@@ -1007,13 +1030,14 @@ $('#veUndo').onclick = undo; $('#veRedo').onclick = redo;
 document.addEventListener('keydown', e => {
   if (document.body.dataset.view !== 'video' || $('dialog[open]')) return;
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+  const onButton = document.activeElement.matches?.('button, a, [role=button]') || document.activeElement.isContentEditable;
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 'z') { if (typing) return; e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { if (typing) return; e.preventDefault(); redo(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
   if (typing) return;
   if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicate(); return; }
-  if (e.key === ' ') { e.preventDefault(); st.playing ? stop() : play(); }
+  if (e.key === ' ' && !onButton) { e.preventDefault(); st.playing ? stop() : play(); }  // Space on a button presses it
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(); }
   else if (e.key.toLowerCase() === 's') split();
   else if (e.key === 'ArrowLeft') seek(st.time - (e.shiftKey ? 1 : 1 / P().fps));
@@ -1069,6 +1093,7 @@ function openDesigns() {
   if (!$('#veDesignDialog').open) $('#veDesignDialog').showModal();
 }
 $('#veDesignSearch').addEventListener('input', openDesigns);
+$('#veDesignSearch').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#veDesigns [data-design]')?.click(); } });
 $('#veNew').onclick = openDesigns;
 
 /* ---------------------------------------------------------------- record yourself */
@@ -1166,7 +1191,7 @@ async function openProjectsDialog() {
 /* ---------------------------------------------------------------- export */
 // Same box as text_area() in studio/video.py: the text plus room for glows and shadows.
 function textArea(c, W, H) {
-  const even = n => { n = Math.max(2, Math.round(n)); return n + (n % 2); };
+  const even = n => { let r = Math.round(n); if (r - n === 0.5 && r % 2) r--; r = Math.max(2, r); return r + (r % 2); };  // Python round()
   const m = Math.trunc(c.text.size * Math.min(W, H) + 0.25 * even(c.h * H));
   const x0 = Math.max(0, Math.trunc(c.x * W) - m), y0 = Math.max(0, Math.trunc(c.y * H) - m);
   const x1 = Math.min(W, Math.trunc((c.x + c.w) * W) + m), y1 = Math.min(H, Math.trunc((c.y + c.h) * H) + m);
@@ -1191,10 +1216,11 @@ async function renderTextImages(progress) {
   return out;
 }
 $('#veExport').onclick = () => {
+  if (!P()) return;
   if (!P().clips.length) { K.toast('Add something to the timeline first.'); return; }
   stop();
   $('#veExSummary').textContent = `${P().name} · ${P().width}×${P().height} · ${fmt(duration())} · saved to creations/exports/`;
-  if (!st.job) {  // reopened while an export runs: keep showing its progress
+  if (!st.job && !st.exporting) {  // reopened while an export runs: keep showing its progress
     $('#veExProgress').hidden = true; $('#veExResult').innerHTML = ''; $('#veExMsg').textContent = '';
     $('#veExGo').disabled = false; $('#veExCancel').hidden = true;
   }
@@ -1203,6 +1229,8 @@ $('#veExport').onclick = () => {
 $('#veExportForm').addEventListener('submit', async e => {
   if (e.submitter && e.submitter.value === 'close') return;
   e.preventDefault();
+  if (st.exporting || st.job) return;
+  st.exporting = true;
   const form = new FormData($('#veExportForm'));
   $('#veExGo').disabled = true; $('#veExMsg').className = 'msg'; $('#veExMsg').textContent = 'Preparing…';
   try {
@@ -1214,6 +1242,7 @@ $('#veExportForm').addEventListener('submit', async e => {
     $('#veExProgress').hidden = false; $('#veExCancel').hidden = false; $('#veExMsg').textContent = 'Exporting…';
     pollJob();
   } catch (err) { $('#veExMsg').className = 'msg error'; $('#veExMsg').textContent = err.message; $('#veExGo').disabled = false; }
+  finally { st.exporting = false; }
 });
 $('#veExCancel').onclick = async () => {
   if (!st.job) return;
@@ -1289,10 +1318,12 @@ window.KVideo = {
   },
   drawText,
 };
+// Save as soon as the tab is hidden: the unload save is limited to 64 KB, too little for big projects.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && st.dirty && P()) save(); });
 window.addEventListener('beforeunload', e => {
   if (!st.dirty || !P()) return;
   // keepalive lets this last save finish even if the user does leave.
-  try { fetch(`/api/video/projects/${P().id}`, {method: 'PUT', keepalive: true, headers: {'Content-Type': 'application/json'}, body: snapshot()}); } catch {}
+  try { fetch(`/api/video/projects/${P().id}`, {method: 'PUT', keepalive: true, headers: {'Content-Type': 'application/json'}, body: snapshot()}).catch(() => {}); } catch {}
   e.preventDefault(); e.returnValue = '';
 });
 })();

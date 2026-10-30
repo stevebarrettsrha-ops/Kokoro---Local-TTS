@@ -92,6 +92,18 @@ def voices():
     return jsonify(engine.catalog())
 
 
+def _json_object():
+    """The request's JSON body if it is an object, else {} (a list or string never crashes a route)."""
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+@app.errorhandler(ValueError)
+def bad_input(exc):
+    """Validation errors (e.g. too many clips) reach the editor as a readable message."""
+    return jsonify({'error': str(exc)[:600]}), 400
+
+
 def _payload():
     if not request.is_json:
         return None, (jsonify({'error': 'Send JSON to this endpoint.'}), 415)
@@ -246,14 +258,65 @@ def recordings():
                     'more': offset + len(page) < len(takes)})
 
 
+@app.post('/api/voices/sources')
+def open_voice_source():
+    """Open a recording in the voice cutter: an uploaded file (audio or video, any length; the
+    first 30 minutes are used), a microphone recording, or a file from the video uploads."""
+    mid = request.form.get('media')
+    try:
+        if mid:
+            meta, path = media.get(mid), media.path(mid)
+            if not path or not meta or not meta.get('has_audio'):
+                return jsonify({'error': 'That upload has no sound in it.'}), 400
+            return jsonify({'source': engine.library.open_source(path, meta.get('name', ''))})
+        upload = request.files.get('file')
+        if upload is None:
+            return jsonify({'error': 'Choose a recording.'}), 400
+        tmp = engine.library.sources / f'.upload-{os.urandom(8).hex()}'
+        try:
+            upload.save(tmp)
+            if not tmp.stat().st_size:
+                return jsonify({'error': 'The file is empty.'}), 400
+            return jsonify({'source': engine.library.open_source(tmp, upload.filename or '')})
+        finally:
+            tmp.unlink(missing_ok=True)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception:  # noqa: BLE001
+        app.logger.exception('Opening a voice recording failed')
+        return jsonify({'error': 'That recording could not be opened. Try another file, or a WAV or MP3.'}), 400
+
+
+@app.get('/api/voices/sources/<sid>/audio')
+def voice_source_audio(sid):
+    path = engine.library.source_path(sid)
+    if path is None:
+        abort(404)
+    return send_file(path, mimetype='audio/wav', conditional=True)
+
+
+@app.delete('/api/voices/sources/<sid>')
+def voice_source_delete(sid):
+    return jsonify({'ok': engine.library.delete_source(sid)})
+
+
 @app.post('/api/voices/clone')
 def add_cloned_voice():
-    """Upload a recording to make a cloned voice. The uploader confirms consent."""
+    """Make a cloned voice from a recording. The uploader confirms consent.
+
+    Either source=<id>&start=&end= (a part chosen in the cutter) or file=<upload>."""
+    if request.form.get('consent') != 'yes':
+        return jsonify({'error': 'Confirm you have the speaker\'s permission to use their voice.'}), 400
+    if request.form.get('source'):
+        try:
+            voice = engine.library.add_from_source(request.form['source'], request.form.get('start'), request.form.get('end'),
+                                                   request.form.get('name', ''), request.form.get('gender', ''))
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        return jsonify({'ok': True, 'voice': voice, 'cloning': engine.cloner.status()})
     upload = request.files.get('file')
     if upload is None:
         return jsonify({'error': 'Choose an audio file.'}), 400
-    if request.form.get('consent') != 'yes':
-        return jsonify({'error': 'Confirm you have the speaker\'s permission to use their voice.'}), 400
     data = upload.read(150 * 1024 * 1024 + 1)
     if len(data) > 150 * 1024 * 1024:
         return jsonify({'error': 'That recording is too large. 10-30 seconds of audio is all that is needed.'}), 400
@@ -361,7 +424,7 @@ def media_thumb(mid):
 
 @app.patch('/api/media/<mid>')
 def media_rename(mid):
-    meta = media.rename(mid, (request.get_json(silent=True) or {}).get('name', ''))
+    meta = media.rename(mid, _json_object().get('name', ''))
     return jsonify({'media': meta}) if meta else abort(404)
 
 
@@ -392,7 +455,7 @@ def project_list():
 
 @app.post('/api/video/projects')
 def project_create():
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     body.pop('id', None)
     project = vid.sanitize_project(body, media, _take_exists)
     return jsonify({'project': projects.save(project)})
@@ -423,7 +486,7 @@ def project_delete(pid):
 
 @app.post('/api/video/projects/<pid>/export')
 def project_export(pid):
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
     if isinstance(body.get('project'), dict):
         old = projects.get(pid) or {}
         projects.save(vid.sanitize_project({**body['project'], 'id': pid, 'created': old.get('created')}, media, _take_exists))

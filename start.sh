@@ -12,8 +12,33 @@ export HF_HUB_OFFLINE="$OFFLINE"
 export HF_DATASETS_OFFLINE="$OFFLINE"
 mkdir -p "$HF_HOME" outputs
 
-if ! command -v espeak-ng >/dev/null 2>&1; then
-  echo 'NOTICE: espeak-ng not found. Install with: sudo apt install espeak-ng libsndfile1' >&2
+# ---- first run: everything the studio needs is fetched now, not on first use ----
+ask() {  # ask "question" -> yes unless the user answers n; no terminal -> no
+  [ -t 0 ] || return 1
+  local answer
+  read -r -p "$1 [Y/n] " answer || return 1
+  case "$answer" in [nN]*) return 1 ;; *) return 0 ;; esac
+}
+
+# System programs: espeak-ng (pronounces unusual words), ffmpeg (video, MP3, recordings), curl.
+missing=()
+for tool in espeak-ng ffmpeg curl; do
+  command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  if [ "$OFFLINE" != '1' ] && command -v apt-get >/dev/null 2>&1 && \
+     ask "Kokoro Studio needs ${missing[*]}. Install with sudo apt now?"; then
+    sudo apt-get update && sudo apt-get install -y "${missing[@]}" || echo 'WARNING: installing system packages failed; continuing.' >&2
+  else
+    echo "NOTICE: missing ${missing[*]}. Install with: sudo apt install ${missing[*]}" >&2
+  fi
+fi
+
+# uv fetches the right Python (3.12) and installs packages quickly; voice cloning needs it.
+if ! command -v uv >/dev/null 2>&1 && [ "$OFFLINE" != '1' ] && command -v curl >/dev/null 2>&1; then
+  if ask 'Install uv (the Python installer from astral.sh, into ~/.local/bin)?'; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh || echo 'WARNING: installing uv failed; continuing.' >&2
+  fi
 fi
 
 compatible_python() {
@@ -98,6 +123,22 @@ fi
 # Verify the English G2P model before the server starts, not during the
 # first synthesis request (which otherwise fails with a browser NetworkError).
 bash ./repair-spacy.sh  # 'bash' so it runs even if the zip lost the executable bits
+
+if [ "$OFFLINE" != '1' ]; then
+  # The Kokoro model and all voices (about 350 MB once; a quick check after that).
+  bash ./download-models.sh || echo 'WARNING: the model download did not finish; it is retried on the next start.' >&2
+  # Cloned voices need ~9 GB more. That installs in the background so the studio can be
+  # used right away; cloned voices start working when it finishes, without a restart.
+  if [ "${SKIP_CLONING:-0}" != '1' ] && [ ! -f .venv-chatterbox/.ready ]; then
+    if command -v uv >/dev/null 2>&1; then
+      mkdir -p data/logs
+      echo 'Setting up voice cloning in the background (large download). Progress: data/logs/setup-cloning.log'
+      nohup bash ./setup-cloning.sh >> data/logs/setup-cloning.log 2>&1 &
+    else
+      echo 'NOTICE: voice cloning needs uv; install it and run ./setup-cloning.sh.' >&2
+    fi
+  fi
+fi
 
 echo "Python: $(.venv/bin/python --version 2>&1)"
 PORT="${KOKORO_PORT:-8765}"

@@ -1,16 +1,44 @@
 #!/usr/bin/env bash
-# One-time setup for cloned voices (Chatterbox by Resemble AI, MIT licence).
-# Chatterbox needs different torch/transformers versions from Kokoro, so it
-# gets its own environment in .venv-chatterbox. Needs ~6 GB disk for the
-# packages plus ~3 GB for model weights (downloaded here, once).
+# Sets up cloned voices (Chatterbox by Resemble AI, MIT licence). ./start.sh runs
+# this by itself in the background on the first run; you can also run it directly.
+# Chatterbox needs different torch/transformers versions from Kokoro, so it gets
+# its own environment in .venv-chatterbox. Needs ~6 GB disk for the packages
+# plus ~3 GB for model weights. Safe to rerun: finished steps are skipped.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export PATH="$HOME/.local/bin:$PATH"
 export HF_HOME="$PWD/data/huggingface"
+export HF_HUB_OFFLINE=0
 mkdir -p "$HF_HOME" voices
+lock=.venv-chatterbox.installing
+ready=.venv-chatterbox/.ready
+weights_cached() {
+  .venv-chatterbox/bin/python - >/dev/null 2>&1 <<'PY'
+from huggingface_hub import hf_hub_download
+for f in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
+    hf_hub_download(repo_id="ResembleAI/chatterbox", filename=f, local_files_only=True)
+PY
+}
+
+# Already done? (Older installs have no .ready marker: check them once and add it.)
+if [ -x .venv-chatterbox/bin/python ] && { [ -f "$ready" ] || .venv-chatterbox/bin/python -c 'import chatterbox' >/dev/null 2>&1; } && weights_cached; then
+  touch "$ready"; rm -f "$lock"
+  echo 'Voice cloning: ready'
+  exit 0
+fi
+
+# Only one setup at a time (start.sh may launch it while you run it by hand).
+if [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; then
+  echo "Voice cloning is already being set up (process $(cat "$lock")). Progress: data/logs/setup-cloning.log"
+  exit 0
+fi
+# The studio treats cloning as unavailable while this file exists, so a half-installed
+# environment is never used. If setup stops part-way, the file stays and the next run resumes.
+echo $$ > "$lock"
+rm -f "$ready"
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo 'ERROR: uv is required (see README Quick start), then rerun ./setup-cloning.sh' >&2
+  echo 'ERROR: uv is required (./start.sh installs it), then rerun ./setup-cloning.sh' >&2
   exit 1
 fi
 if [ ! -x .venv-chatterbox/bin/python ]; then
@@ -26,8 +54,11 @@ from huggingface_hub import hf_hub_download
 for f in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
     print("  ", f, flush=True)
     hf_hub_download(repo_id="ResembleAI/chatterbox", filename=f)
+import chatterbox  # noqa: F401  (fails here, not in the studio, if the install is broken)
 import torch
 print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none (CPU mode, slow)")
 PY
+touch "$ready"
+rm -f "$lock"
 echo
-echo 'Voice cloning is ready. Start the studio with ./start.sh and use "Add a voice" in the Voice panel.'
+echo 'Voice cloning is ready. Use "Add a voice from a recording" in the Voice panel (no restart needed).'

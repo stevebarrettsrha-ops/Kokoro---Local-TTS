@@ -29,8 +29,9 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 .ve-thumb em { position: absolute; right: 3px; bottom: 3px; font-style: normal; font-size: 10px; background: rgb(0 0 0 / .65); color: #fff; padding: 0 4px; border-radius: 2px; }
 .ve-thumb em.busy { left: 3px; right: auto; }
 .ve-item-name { font-size: 11px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
-.ve-item-act { position: absolute; top: 3px; right: 3px; display: none; gap: 3px; }
-.ve-item:hover .ve-item-act, .ve-item:focus-within .ve-item-act { display: flex; }
+/* Hidden by opacity, not display:none, so keyboard users can still Tab to the buttons. */
+.ve-item-act { position: absolute; top: 3px; right: 3px; display: flex; gap: 3px; opacity: 0; }
+.ve-item:hover .ve-item-act, .ve-item:focus-within .ve-item-act { opacity: 1; }
 .ve-item-act .icon-btn { width: 22px; height: 22px; font-size: 13px; }
 .ve-empty { font-size: 12px; }
 .ve-takes { display: grid; gap: 8px; }
@@ -134,8 +135,10 @@ input[type="color"] { width: 34px; height: 26px; padding: 0 2px; border: 1px sol
 }
 @media (max-width: 900px) {
   #view-video.active { overflow: auto; }
-  .ve { height: auto; grid-template-rows: auto auto 300px; }
-  .ve-main { grid-template-columns: 1fr; }
+  .ve { height: auto; grid-template-rows: auto auto 300px; grid-template-columns: minmax(0, 1fr); }
+  .ve-main { grid-template-columns: minmax(0, 1fr); }  /* minmax: wide content never pushes past the screen */
+  .ve-top { gap: 8px 12px; padding: 8px 12px; }
+  .ve-top select { max-width: 100%; }
   .ve-stage-wrap { height: 56vw; min-height: 220px; }
   .ve-bin, .ve-props { border: 0; border-bottom: 1px solid var(--line); max-height: 320px; }
 }

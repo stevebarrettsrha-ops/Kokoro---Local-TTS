@@ -29,6 +29,10 @@ MIN_SECONDS = 6.0
 MAX_SECONDS = 30.0
 BEST_WINDOW = 10.0  # Chatterbox builds the voice's sound mostly from the first 10 s
 CLONE_PREFIX = 'clone:'
+SOURCE_MAX_SECONDS = 30 * 60   # longest recording the cutter opens (the first 30 min are used)
+SUGGEST_SECONDS = 20.0          # length of the "best part" the cutter preselects
+PEAKS = 1600                    # waveform resolution sent to the cutter
+SOURCE_RE = re.compile(r'[0-9a-f]{32}')
 
 
 def slugify(name):
@@ -73,10 +77,10 @@ class VoiceLibrary:
         return {v['id']: v['name'] for v in self.list()}
 
     def add(self, data: bytes, filename: str, name: str, gender: str = ''):
-        name = ' '.join(str(name or '').split())[:40]
-        if not name:
-            raise ValueError('Give the voice a name.')
-        y = decode_audio(data, filename)
+        name = _clean_name(name)
+        return self._save(decode_audio(data, filename), name, gender, filename)
+
+    def _save(self, y, name, gender, source_name, extra=None):
         ref, info = prepare_reference(y)
         slug = slugify(name)
         if (self.dir / f'{slug}.json').exists():
@@ -84,9 +88,78 @@ class VoiceLibrary:
         sf.write(str(self.dir / f'{slug}.wav'), ref, SR, subtype='PCM_16')
         meta = {'name': name, 'gender': gender if gender in ('Female', 'Male') else '',
                 'seconds': round(len(ref) / SR, 1), 'created': datetime.now(timezone.utc).isoformat(),
-                'source_file': Path(filename or '').name[:80], **info}
+                'source_file': Path(source_name or '').name[:80], **info, **(extra or {})}
         (self.dir / f'{slug}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
         return self.get(CLONE_PREFIX + slug)
+
+    # ---- sources: a recording opened in the cutter, before the voice is made ----
+    @property
+    def sources(self):
+        d = self.dir / '.sources'
+        d.mkdir(exist_ok=True)
+        return d
+
+    def open_source(self, path, filename=''):
+        """Decode any audio or video file into a source the cutter can show and play.
+
+        Returns {id, name, seconds, peaks, suggest: [start, end]}.
+        """
+        self.prune_sources()
+        y = decode_file(path, SOURCE_MAX_SECONDS)
+        if len(y) < SR * 1:
+            raise ValueError('That recording is shorter than a second.')
+        sid = uuid.uuid4().hex
+        sf.write(str(self.sources / f'{sid}.wav'), np.clip(y, -1, 1), SR, subtype='PCM_16')
+        name = Path(filename or '').name[:80]
+        (self.sources / f'{sid}.json').write_text(json.dumps({'name': name}), encoding='utf-8')
+        return {'id': sid, 'name': name, 'seconds': round(len(y) / SR, 2), 'peaks': peaks(y),
+                'suggest': list(best_part(y))}
+
+    def source_path(self, sid):
+        if not isinstance(sid, str) or not SOURCE_RE.fullmatch(sid):
+            return None
+        p = self.sources / f'{sid}.wav'
+        return p if p.is_file() else None
+
+    def delete_source(self, sid):
+        p = self.source_path(sid)
+        if not p:
+            return False
+        p.unlink(missing_ok=True)
+        p.with_suffix('.json').unlink(missing_ok=True)
+        return True
+
+    def prune_sources(self, max_age_s=24 * 3600):
+        now = datetime.now().timestamp()
+        for f in self.sources.glob('*'):
+            try:
+                if now - f.stat().st_mtime > max_age_s:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    def add_from_source(self, sid, start, end, name, gender=''):
+        """Make a voice from the part [start, end] (seconds) of an opened source."""
+        name = _clean_name(name)
+        path = self.source_path(sid)
+        if path is None:
+            raise ValueError('That recording is no longer open. Choose it again.')
+        y, sr = sf.read(str(path), dtype='float32')
+        dur = len(y) / sr
+        try:
+            a, b = max(0.0, float(start)), min(dur, float(end))
+        except (TypeError, ValueError):
+            a, b = 0.0, dur
+        if not (b - a >= 1.0) or not np.isfinite(a + b):
+            raise ValueError('Select at least a few seconds of the recording.')
+        try:
+            meta = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            meta = {}
+        voice = self._save(y[int(a * sr):int(b * sr)], name, gender, meta.get('name', ''),
+                           {'cut': [round(a, 2), round(b, 2)]})
+        self.delete_source(sid)
+        return voice
 
     def delete(self, voice_id):
         v = self.get(voice_id)
@@ -97,6 +170,72 @@ class VoiceLibrary:
             if p.exists():
                 p.unlink()
         return True
+
+
+def _clean_name(name):
+    name = ' '.join(str(name or '').split())[:40]
+    if not name:
+        raise ValueError('Give the voice a name.')
+    return name
+
+
+def decode_file(path, max_seconds=SOURCE_MAX_SECONDS):
+    """Audio track of any file ffmpeg (or soundfile) can read -> mono float32 at 24 kHz.
+
+    Reads from disk, so large videos never sit in memory; stops after max_seconds.
+    """
+    path = Path(path)
+    try:
+        info = sf.info(str(path))
+        if info.frames / info.samplerate <= max_seconds + 1:
+            y, sr = sf.read(str(path), dtype='float32', always_2d=True)
+            return fx.resample(y.mean(axis=1), int(sr), SR)
+    except Exception:  # noqa: BLE001 - not a format soundfile knows (mp4, m4a, webm...)
+        pass
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise ValueError('Could not read that file. Use WAV, FLAC, OGG or MP3, or install ffmpeg for other formats.')
+    proc = subprocess.run([ffmpeg, '-loglevel', 'error', '-i', str(path), '-vn', '-t', str(max_seconds),
+                           '-ac', '1', '-ar', str(SR), '-f', 'f32le', 'pipe:1'], capture_output=True, timeout=600)
+    if proc.returncode != 0 or not proc.stdout:
+        raise ValueError('Could not find any sound in that file.')
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+
+def _speech_frames(y, hop):
+    """Per frame: speech present and not clipped."""
+    frames = len(y) // hop
+    if not frames:
+        return np.zeros(0, bool)
+    f = y[: frames * hop].reshape(frames, hop)
+    rms = np.sqrt(np.mean(f.astype(np.float64) ** 2, axis=1))
+    clipped = np.mean(np.abs(f) > 0.985, axis=1)
+    return (rms > rms.max() * 10 ** (-30 / 20)) & (clipped < 0.002)
+
+
+def best_part(y, seconds=SUGGEST_SECONDS):
+    """(start, end) in seconds of the window with the most clean speech."""
+    total = len(y) / SR
+    if total <= seconds:
+        return 0.0, round(total, 2)
+    hop = SR // 2
+    speech = _speech_frames(y, hop).astype(float)
+    win = int(seconds * 2)
+    if len(speech) <= win:
+        return 0.0, round(min(total, seconds), 2)
+    start = int(np.argmax(np.convolve(speech, np.ones(win), 'valid'))) * 0.5
+    return round(start, 2), round(min(total, start + seconds), 2)
+
+
+def peaks(y, n=PEAKS):
+    """Waveform outline for the cutter: n peak values in 0..1."""
+    if not len(y):
+        return []
+    n = min(n, len(y))
+    edges = np.linspace(0, len(y), n + 1).astype(int)
+    out = np.maximum.reduceat(np.abs(y), edges[:-1])
+    top = float(out.max()) or 1.0
+    return [round(float(v) / top, 3) for v in out]
 
 
 def decode_audio(data: bytes, filename: str = ''):
@@ -156,21 +295,39 @@ class CloneWorker:
 
     def __init__(self, python=None, script=None, root=None):
         root = Path(root or Path(__file__).resolve().parents[1])
-        self.python = Path(python or os.environ.get('CHATTERBOX_PYTHON') or root / '.venv-chatterbox' / 'bin' / 'python')
+        custom = python or os.environ.get('CHATTERBOX_PYTHON')
+        self.python = Path(custom or root / '.venv-chatterbox' / 'bin' / 'python')
+        # setup-cloning.sh holds this file (with its process id) while it installs.
+        self.setup_lock = None if custom else root / '.venv-chatterbox.installing'
+        self.setup_log = root / 'data' / 'logs' / 'setup-cloning.log'
         self.script = Path(script or root / 'cloning' / 'chatterbox_worker.py')
         self.proc = None
         self.lock = threading.Lock()
         self.scratch = root / 'outputs' / '.clone-tmp'
 
+    def setup_state(self):
+        """'installing', 'interrupted' (setup stopped part-way) or None."""
+        if not self.setup_lock or not self.setup_lock.exists():
+            return None
+        try:
+            os.kill(int(self.setup_lock.read_text().strip()), 0)
+            return 'installing'
+        except (ValueError, OSError):
+            return 'interrupted'
+
     def available(self):
-        return self.python.exists() and self.script.exists()
+        return self.python.exists() and self.script.exists() and self.setup_state() is None
 
     def _start(self):
         if self.proc and self.proc.poll() is None:
             return
         if not self.available():
-            raise RuntimeError('Voice cloning is not installed yet. Stop the studio and run ./setup-cloning.sh, '
-                               'then start it again.')
+            state = self.setup_state()
+            if state == 'installing':
+                raise RuntimeError('Voice cloning is still being installed in the background (a large download). '
+                                   'Try again when it finishes; no restart is needed.')
+            raise RuntimeError('Voice cloning is not installed yet. Run ./start.sh while online (it installs it), '
+                               'or run ./setup-cloning.sh.')
         self.scratch.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
         self.proc = subprocess.Popen([str(self.python), str(self.script)], stdin=subprocess.PIPE,
@@ -222,7 +379,8 @@ class CloneWorker:
         return y
 
     def status(self):
-        return {'installed': self.available(), 'running': bool(self.proc and self.proc.poll() is None)}
+        return {'installed': self.available(), 'running': bool(self.proc and self.proc.poll() is None),
+                'setup': self.setup_state()}
 
     def close(self):
         if self.proc and self.proc.poll() is None:

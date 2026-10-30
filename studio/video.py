@@ -42,6 +42,7 @@ MOTION = {'fade': (0, 0, 1, 1), 'rise': (0, 0.06, 1, 1), 'drop': (0, -0.06, 1, 1
 TRANSITION_ANIM = {'crossfade': 'fade', 'slide-left': 'slide-left', 'slide-right': 'slide-right', 'slide-up': 'slide-up',
                    'slide-down': 'slide-down', 'zoom': 'zoom-out'}
 MAX_PROJECT_SECONDS = 60 * 60
+PROXY_SLOTS = threading.BoundedSemaphore(2)  # preview conversions at once (each is a full ffmpeg encode)
 
 
 def now():
@@ -193,12 +194,17 @@ class MediaLibrary:
         if kind in ('video', 'audio') and not info['duration']:
             # Browser recordings (MediaRecorder WebM) often carry no duration; a copy-remux adds it.
             fixed = path.with_name(f'{mid}.fixed.{ext}')
-            subprocess.run([tools()['ffmpeg'] or 'ffmpeg', '-y', '-loglevel', 'error', '-i', str(path), '-c', 'copy', str(fixed)],
-                           capture_output=True, timeout=600)
-            if fixed.is_file() and fixed.stat().st_size:
-                fixed.replace(path)
-                info = probe(path)
-            fixed.unlink(missing_ok=True)
+            try:
+                subprocess.run([tools()['ffmpeg'] or 'ffmpeg', '-y', '-loglevel', 'error', '-i', str(path), '-c', 'copy', str(fixed)],
+                               capture_output=True, timeout=600)
+                if fixed.is_file() and fixed.stat().st_size:
+                    fixed.replace(path)
+                    info = probe(path)
+            except Exception:
+                path.unlink(missing_ok=True)  # no meta file was written yet: don't leave a large orphan
+                raise
+            finally:
+                fixed.unlink(missing_ok=True)
         if kind == 'image' and not info['has_video']:
             path.unlink(missing_ok=True)
             raise ValueError(f'"{filename}" could not be read as a picture.')
@@ -231,16 +237,22 @@ class MediaLibrary:
 
     def _make_proxy(self, mid):
         """Browser-playable preview copy (e.g. for iPhone HEVC .mov). Export still uses the original."""
-        meta = self.get(mid)
         exe = tools()['ffmpeg']
         status = 'failed'
-        if meta and exe:
-            out = self.dir / f'{mid}.proxy.mp4'
-            proc = subprocess.run([exe, '-y', '-loglevel', 'error', '-i', str(self.dir / meta['file']),
-                                   '-vf', "scale=-2:'min(720,ih)'", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
-                                   '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', str(out)],
-                                  capture_output=True, timeout=3600)
-            status = 'ready' if proc.returncode == 0 and out.is_file() else 'failed'
+        with PROXY_SLOTS:
+            meta = self.get(mid)
+            if meta and exe:
+                out = self.dir / f'{mid}.proxy.mp4'
+                try:
+                    proc = subprocess.run([exe, '-y', '-loglevel', 'error', '-i', str(self.dir / meta['file']),
+                                           '-vf', "scale=-2:'min(720,ih)'", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+                                           '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', str(out)],
+                                          capture_output=True, timeout=3600)
+                    status = 'ready' if proc.returncode == 0 and out.is_file() else 'failed'
+                except (OSError, subprocess.SubprocessError):
+                    status = 'failed'
+                if status == 'failed':
+                    out.unlink(missing_ok=True)
         meta = self.get(mid)
         if not meta:  # deleted while the proxy was being made
             (self.dir / f'{mid}.proxy.mp4').unlink(missing_ok=True)
@@ -301,7 +313,13 @@ def sanitize_project(p, media: MediaLibrary | None = None, take_exists=None):
         'clips': [], 'created': p.get('created') or now(), 'updated': now(),
     }
     seen = set()
-    for c in (p.get('clips') or [])[:MAX_CLIPS]:
+    clips = p.get('clips') or []
+    if not isinstance(clips, list):
+        clips = []
+    if len(clips) > MAX_CLIPS:
+        raise ValueError(f'A video can have at most {MAX_CLIPS} clips (this one has {len(clips)}). '
+                         'Split it into two videos, or use fewer, longer captions.')
+    for c in clips:
         if not isinstance(c, dict) or c.get('kind') not in KINDS:
             continue
         kind = c['kind']
@@ -749,8 +767,22 @@ class ExportJobs:
         part = self.dir / f'.{job["file"]}.part.mp4'
         args, total, warnings = build_command(req['project'], resolve, pngs, part, lufs=req['lufs'],
                                               encoder=self.encoder(), quality=req['quality'])
+        # The filter graph goes in a file: long caption tracks make it larger than the 128 KiB
+        # Linux allows for one command-line argument ("Argument list too long").
+        i = args.index('-filter_complex')
+        graph = folder / 'graph.txt'
+        graph.write_text(args[i + 1], encoding='utf-8')
+        args[i:i + 2] = [self.graph_option(), str(graph)]
         job.update(total=total, warnings=warnings)
         return [tools()['ffmpeg'], *args]
+
+    def graph_option(self):
+        """ffmpeg option that reads the filter graph from a file (renamed in ffmpeg 7.1)."""
+        if getattr(self, '_graph_option', None) is None:
+            exe = tools()['ffmpeg']
+            text = subprocess.run([exe, '-hide_banner', '-h', 'full'], capture_output=True, text=True).stdout if exe else ''
+            self._graph_option = '-filter_complex_script' if '-filter_complex_script' in text else '-/filter_complex'
+        return self._graph_option
 
     def recover(self, resolve):
         """After a restart: drop half-written files and old records, and start again any export
@@ -770,16 +802,21 @@ class ExportJobs:
 
     def resume(self, resolve):
         """Start again any export a restart interrupted. Returns the ids restarted."""
-        if not tools()['ffmpeg']:
-            return []
         with self.lock:
             pending = sorted((j for j in self.jobs.values() if j['status'] == 'running' and not j['proc']),
                              key=lambda j: j.get('created') or '', reverse=True)
         restarted = []
         for i, job in enumerate(pending):
             try:
+                if not tools()['ffmpeg']:
+                    raise RuntimeError('ffmpeg is required to export video: sudo apt install ffmpeg')
                 if i:  # only one export runs at a time
                     raise RuntimeError('Interrupted when the studio stopped. Export again.')
+                # An export that keeps getting interrupted may be what stops the computer: give up after two tries.
+                if job.get('attempts', 0) >= 2:
+                    raise RuntimeError('This export was interrupted several times, so it was not restarted again. '
+                                       'Export again, perhaps at a smaller quality.')
+                job['attempts'] = job.get('attempts', 0) + 1
                 cmd = self._command(job, resolve)
             except Exception as exc:  # noqa: BLE001
                 job.update(status='failed', error=str(exc)[:500] or 'Interrupted when the studio stopped.')
@@ -840,8 +877,9 @@ class ExportJobs:
         job = self.jobs.get(job_id)
         if job and job['status'] == 'running':
             job['status'] = 'cancelled'
-            if job['proc']:
-                job['proc'].kill()
+            proc = job.get('proc')  # _run may clear it at any moment
+            if proc:
+                proc.kill()
             return True
         return False
 
@@ -861,16 +899,16 @@ class ExportJobs:
 
     def exports(self):
         items = []
-        for p in sorted(self.dir.glob('*.mp4'), key=lambda p: p.stat().st_mtime, reverse=True):
+        for p in self.dir.glob('*.mp4'):
             if p.name.startswith('.'):
                 continue
             try:
                 st = p.stat()
-            except OSError:  # deleted while listing
+            except OSError:  # renamed or deleted while listing
                 continue
             items.append({'file': p.name, 'size': st.st_size,
                           'created': datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()})
-        return items
+        return sorted(items, key=lambda i: i['created'], reverse=True)
 
     def export_path(self, name):
         if not re.fullmatch(r'[A-Za-z0-9._-]+\.mp4', name or '') or name.startswith('.'):
