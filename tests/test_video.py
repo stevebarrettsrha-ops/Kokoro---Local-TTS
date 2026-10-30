@@ -278,3 +278,56 @@ def test_cropped_text_images_are_placed_by_offset(tmp_path):
     graph = args[args.index('-filter_complex') + 1]
     assert "overlay=x='500':y='300'" in graph and 'crop=' not in graph and not warnings
     assert '-loop' not in args  # stills are decoded once, not once per frame
+
+
+def test_long_caption_tracks_export(tmp_path, assets):
+    # 600 animated captions make a filter graph far larger than one 128 KiB command-line argument.
+    clips = [{'kind': 'text', 'id': f'c{i}', 'start': i * 0.05, 'duration': 0.05, 'x': 0.1, 'y': 0.8, 'w': 0.8, 'h': 0.1,
+              'text': {'content': str(i)}, 'anim_in': {'type': 'pop', 'dur': 0.1}} for i in range(600)]
+    project = vid.sanitize_project({'name': 'Many', 'format': '1:1', 'clips': clips})
+    png = 'data:image/png;base64,' + base64.b64encode((assets / 'text.png').read_bytes()).decode()
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    job = jobs.start(project, lambda m: (None, False), {f'c{i}': {'png': png, 'x': 100, 'y': 800} for i in range(600)}, quality='small')
+    end = time.time() + 300
+    while jobs.get(job['id'])['status'] == 'running' and time.time() < end:
+        time.sleep(0.5)
+    assert jobs.get(job['id'])['status'] == 'done', jobs.get(job['id'])['error']
+
+
+def test_too_many_clips_is_an_error_not_silent_loss(tmp_path, monkeypatch):
+    import app as server
+    with pytest.raises(ValueError, match='at most 600'):
+        vid.sanitize_project({'clips': [{'kind': 'color'}] * 601})
+    monkeypatch.setattr(server, 'projects', vid.ProjectStore(tmp_path / 'p'))
+    c = server.app.test_client()
+    r = c.post('/api/video/projects', json={'clips': [{'kind': 'color'}] * 601})
+    assert r.status_code == 400 and 'at most 600' in r.get_json()['error']
+    # bodies that aren't JSON objects are refused politely, never a 500
+    assert c.post('/api/video/projects', json=['x']).status_code == 200
+    assert c.patch('/api/media/' + 'a' * 32, json='x').status_code == 404
+    assert c.post('/api/phonemize', json={'text': 'hi', 'voice': ['x']}).status_code == 400
+
+
+def test_resume_gives_up_after_two_interruptions(tmp_path, assets, monkeypatch):
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    pic = lib.add((assets / 'photo.png').read_bytes(), 'p.png')
+    project = vid.sanitize_project({'clips': [{'kind': 'image', 'media': pic['id'], 'duration': 1}]}, lib)
+    resolve = lambda mid: (lib.path(mid), False)
+    with monkeypatch.context() as m:
+        m.setattr(vid.threading, 'Thread', lambda *a, **k: type('T', (), {'start': lambda self: None})())
+        job = vid.ExportJobs(tmp_path / 'exports').start(project, resolve, {})
+        for _ in range(2):  # the computer goes down during the export, twice
+            assert vid.ExportJobs(tmp_path / 'exports').recover(resolve) == [job['id']]
+        third = vid.ExportJobs(tmp_path / 'exports')
+        assert third.recover(resolve) == []
+    assert third.get(job['id'])['status'] == 'failed' and 'several times' in third.get(job['id'])['error']
+    assert not third.active()  # nothing blocks the next export
+
+
+def test_resume_without_ffmpeg_frees_the_slot(tmp_path, monkeypatch):
+    jobs_dir = tmp_path / 'exports' / '.jobs' / ('b' * 32)
+    jobs_dir.mkdir(parents=True)
+    (jobs_dir / 'job.json').write_text(json.dumps({'id': 'b' * 32, 'status': 'running', 'file': 'x.mp4', 'created': 'now'}))
+    monkeypatch.setattr(vid, 'tools', lambda: {'ffmpeg': None, 'ffprobe': None})
+    jobs = vid.ExportJobs(tmp_path / 'exports')
+    assert jobs.recover(lambda m: (None, False)) == [] and jobs.get('b' * 32)['status'] == 'failed'

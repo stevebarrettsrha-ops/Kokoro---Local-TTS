@@ -36,31 +36,30 @@ This replaces the old approach of pitch-shifting finished audio, which smeared t
 ## Quick start (Ubuntu / Linux Mint / Debian)
 
 1. Clone or extract this folder and open a terminal in it.
-2. Install system dependencies once. **Kokoro 0.9.4 needs Python 3.10–3.12**; on Ubuntu 26.04 use `uv` to get an app-only Python 3.12:
-
-   ```bash
-   sudo apt update
-   sudo apt install -y curl espeak-ng libsndfile1 ffmpeg
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   export PATH="$HOME/.local/bin:$PATH"
-   uv python install 3.12
-   ```
-
-   `ffmpeg` is needed for the Video tab, MP3 export and some recording formats (M4A, and the WebM made by "Record yourself").
-
-3. Start the studio:
+2. Start the studio, while online:
 
    ```bash
    ./start.sh
    ```
 
-4. Your browser opens `http://127.0.0.1:8765`. Stop with Ctrl+C.
+3. Your browser opens `http://127.0.0.1:8765`. Stop with Ctrl+C.
 
-Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. The model and voices download from Hugging Face on first use, so the first render needs internet.
+The first run downloads everything, so nothing has to download later. It asks before installing anything on the system itself:
+
+- **System programs:** `espeak-ng` (pronounces unusual words), `ffmpeg` (Video tab, MP3 export, recordings) and `curl`. It installs them with `sudo apt` if you say yes.
+- **uv:** fetches Python 3.12 for the studio without touching the system Python (Kokoro 0.9.4 needs Python 3.10–3.12; Ubuntu 26.04 ships 3.14). It's installed into `~/.local/bin` if you say yes.
+- **Python packages, the spaCy English model, the Kokoro model and all 28 voices:** about 2.5 GB, into this folder.
+- **Voice cloning (Chatterbox):** about 9 GB more. This installs **in the background** while you already use the studio; progress goes to `data/logs/setup-cloning.log`. Cloned voices start working when it finishes, with no restart. To skip it, start with `SKIP_CLONING=1 ./start.sh`.
+
+Later starts only check that everything is still there, which takes a few seconds. If a download was interrupted, the next start carries on from where it stopped.
+
+To install the system programs yourself instead: `sudo apt install -y curl espeak-ng ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+
+Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. The model and all voices download during the first `./start.sh`.
 
 ### Offline use
 
-While online, run `./start.sh` once so it installs everything, then run `./download-models.sh`. If you want cloned voices offline too, also run `./setup-cloning.sh` while online. After that, start with `OFFLINE=1 ./start.sh`.
+Run `./start.sh` once while online and let the background cloning setup finish (see `data/logs/setup-cloning.log`). After that, start with `OFFLINE=1 ./start.sh`.
 
 ### GPU
 
@@ -146,18 +145,13 @@ Pick a second voice under *Blend with*.
 
 Built-in Kokoro voices can't be changed into a different person, so the studio can also make a voice from a recording of a real speaker. This uses [Chatterbox](https://github.com/resemble-ai/chatterbox) by Resemble AI (MIT licence), which runs locally. A clone captures the speaker's sound, accent and way of speaking.
 
-**One-time setup** (stop the studio first):
-
-```bash
-./setup-cloning.sh
-```
-
-This creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro. It also downloads the model. Plan for about 6 GB of packages plus about 3 GB of model; the download is safe to rerun if it's interrupted. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
+**Setup** happens by itself: the first `./start.sh` installs it in the background (see Quick start). You can also run `./setup-cloning.sh` yourself; it skips whatever is already done. It creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro, and downloads the model: about 6 GB of packages plus about 3 GB of model. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
 
 **Adding a voice:** in the Voice panel, choose **Add a voice from a recording…**
 
-- Upload 10–30 seconds of one person speaking naturally, in a quiet room with no music.
-- The studio finds the cleanest 10 seconds and builds the voice from those.
+- Choose the sound: **Choose a file…** (any audio or video file, of any length; the first 30 minutes are opened), **Record** from your microphone, or pick a file you already uploaded in the Video tab.
+- The waveform appears with the clearest 20 seconds selected. Drag across it to choose a different part, drag the green edges to fine-tune, or type the times. A click plays from that point; ▷ plays the selection.
+- Choose 10–30 seconds of one person speaking naturally, with no music or other voices. The cleanest 10 seconds inside your selection go first, because they matter most.
 - Only use your own voice, or a voice whose owner has given you permission.
 
 Cloned voices appear under *Your voices*. They also work in dialogue with `[voice=Marcus]`.
@@ -215,7 +209,7 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 - **`Requires-Python >=3.10,<3.13`**: install Python 3.12 with `uv` as above and rerun `./start.sh`.
 - **MP3 option greyed out**: install `ffmpeg`.
 - **Port in use**: `KOKORO_PORT=8899 ./start.sh`.
-- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
+- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning), `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
 
 ## Privacy
 

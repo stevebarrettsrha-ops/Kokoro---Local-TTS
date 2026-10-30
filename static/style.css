@@ -25,7 +25,7 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans);
-  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; -webkit-font-smoothing: antialiased;
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); -webkit-font-smoothing: antialiased;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -292,12 +292,13 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
 
 /* ---------- small screens ---------- */
 @media (max-width: 1080px) {
-  .workspace { grid-template-columns: 1fr; }
+  .workspace { grid-template-columns: minmax(0, 1fr); }  /* minmax: content never widens the page */
   .inspector { border-left: 0; border-top: 1px solid var(--line); }
   .paper { min-height: 320px; }
 }
 @media (max-width: 760px) {
-  .bar { gap: 12px; padding: 0 12px; }
+  .bar { gap: 8px; padding: 0 12px; }
+  .tabs { min-width: 0; overflow-x: auto; }
   .status #deviceText, .status #engineText, .status .sep, .brand span { display: none; }
   .tab { padding: 0 8px; }
   .editor { padding: 14px 16px; }
@@ -316,3 +317,21 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
   .kbd-hint { display: none; }
   .page { padding: 20px 16px 40px; }
 }
+
+/* voice cutter (clone dialog) */
+.clone-source { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 8px; }
+.clone-source select { flex: 1 1 200px; min-width: 0; }
+.file-btn { position: relative; overflow: hidden; cursor: pointer; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.file-btn:focus-within { outline: 2px solid var(--ink); outline-offset: 2px; }
+#cloneRec[aria-pressed="true"] { color: #fff; background: #c0392b; border-color: #c0392b; }
+.cutter { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 6px 0 10px; }
+.cutter-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; font-size: 12px; margin-bottom: 6px; min-width: 0; }
+.cutter-head #cutName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cut-len { font-variant-numeric: tabular-nums; }
+.cut-len.ok { color: var(--ok); } .cut-len.warn { color: var(--warn); } .cut-len.bad { color: var(--err); }
+#cutWave { width: 100%; height: 84px; display: block; cursor: crosshair; touch-action: none; border-radius: 4px; }
+.cutter-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+.cut-time { display: flex; align-items: center; gap: 4px; }
+.cut-time input { width: 84px; }
+.cut-help { font-size: 12px; margin: 6px 0 0; }

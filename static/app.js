@@ -78,6 +78,7 @@ function show(view) {
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
   document.body.dataset.view = view;
   if (view !== 'script' && !audio.paused) audio.pause();
+  if (view !== 'script') stopPreview();
   if (view === 'takes') loadTakes();
   if (view === 'video') window.KVideo?.onShow();
   else window.KVideo?.onHide();
@@ -452,7 +453,7 @@ function changed() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => store.set('kokoro-draft', state.startFailed
     // The engine didn't answer at start-up, so the panel shows fallback values: keep the saved settings.
-    ? {...(store.get('kokoro-draft', null) || {}), text: script.value, name: $('#projectName').value}
+    ? {...(store.get('kokoro-draft', null) || {}), text: script.value, name: $('#projectName').value, pron: state.pron}
     : {text: script.value, name: $('#projectName').value, settings: readSettings(), pron: state.pron}), 400);
   clearTimeout(estTimer); estTimer = setTimeout(updateEstimate, 150);
 }
@@ -557,7 +558,7 @@ function tick() {
   paintWave();
   if (!audio.paused) raf = requestAnimationFrame(tick);
 }
-audio.addEventListener('play', () => { $('#playBtn').textContent = '❚❚'; $('#playBtn').setAttribute('aria-label', 'Pause'); cancelAnimationFrame(raf); tick(); });
+audio.addEventListener('play', () => { stopPreview(); $('#playBtn').textContent = '❚❚'; $('#playBtn').setAttribute('aria-label', 'Pause'); cancelAnimationFrame(raf); tick(); });
 audio.addEventListener('pause', () => { $('#playBtn').textContent = '▶'; $('#playBtn').setAttribute('aria-label', 'Play'); tick(); });
 audio.addEventListener('ended', () => { $('#nowLine').textContent = ''; });
 audio.addEventListener('loadedmetadata', () => { $('#tDur').textContent = fmt(audio.duration); tick(); });
@@ -677,7 +678,7 @@ async function loadTakes(more = false) {
     takes.total = d.total;
     $('#takeCount').textContent = d.total || '';
   } catch (err) {
-    if (more) { toast('Could not load older takes: ' + err.message); return; }
+    if (more) { toast('Could not load older takes: ' + err.message); renderTakes(); return; }
     list.innerHTML = `<p class="empty">Could not load takes: ${esc(err.message)}</p>`; return;
   }
   renderTakes();
@@ -763,15 +764,185 @@ $('#newRead').onclick = () => { state.variation = ((state.variation || 0) + 1) %
 
 function openVoices() {
   renderCloneList();
+  refreshCatalog().then(renderCloneList).catch(() => {});  // install state may have changed
   $('#cloneMsg').textContent = ''; $('#cloneMsg').className = 'msg';
+  loadCloneMedia();
   $('#voiceDialog').showModal();
 }
+$('#voiceDialog').addEventListener('close', () => { stopRecording(true); cutStop(); });
+
+/* ---------- voice cutter: choose the part of a recording a cloned voice is made from ---------- */
+const cut = {src: null, start: 0, end: 0, drag: null, audio: null, raf: 0};
+const cutMsg = (text, kind = '') => { $('#cloneMsg').className = 'msg' + (kind ? ' ' + kind : ''); $('#cloneMsg').textContent = text; };
+async function loadCloneMedia() {
+  const sel = $('#cloneMedia');
+  try {
+    const items = (await api('/api/media')).media.filter(m => m.has_audio && (m.kind === 'audio' || m.kind === 'video'));
+    sel.innerHTML = '<option value="">From your video uploads…</option>' +
+      items.map(m => `<option value="${esc(m.id)}">${esc(m.name)} (${m.kind}, ${fmtShort(m.duration || 0)})</option>`).join('');
+    sel.disabled = !items.length;
+    if (!items.length) sel.options[0].textContent = 'No uploads with sound yet';
+  } catch { sel.disabled = true; }
+}
+async function openSource(body, label) {
+  cutStop();
+  const old = cut.src;
+  cutMsg(`Opening ${label}…`);
+  $('#cloneSubmit').disabled = true;
+  try {
+    const r = await fetch('/api/voices/sources', {method: 'POST', body});
+    const j = await r.json().catch(() => ({error: `Could not open the recording (${r.status})`}));
+    if (!r.ok) throw Error(j.error || 'Could not open the recording.');
+    cut.src = j.source; [cut.start, cut.end] = j.source.suggest;
+    if (old) fetch(`/api/voices/sources/${old.id}`, {method: 'DELETE'}).catch(() => {});
+    cut.audio = new Audio(`/api/voices/sources/${cut.src.id}/audio`); cut.audio.preload = 'auto';
+    $('#cutter').hidden = false;
+    $('#cutName').textContent = `${cut.src.name || label} · ${fmtShort(cut.src.seconds)}`;
+    $('#cutStart').max = $('#cutEnd').max = cut.src.seconds;
+    cutUpdate();
+    cutMsg(cut.src.seconds > 30 ? 'The clearest 20 seconds are selected. Adjust the selection if you like, then create the voice.' : '');
+  } catch (err) { cutMsg(err.message, 'error'); }
+  finally { $('#cloneSubmit').disabled = false; }
+}
+$('#cloneFile').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const body = new FormData(); body.append('file', f, f.name);
+  openSource(body, f.name);
+  e.target.value = '';
+};
+$('#cloneMedia').onchange = e => {
+  if (!e.target.value) return;
+  const body = new FormData(); body.append('media', e.target.value);
+  openSource(body, e.target.selectedOptions[0].textContent);
+  e.target.value = '';
+};
+// Record straight from the microphone.
+let recorder = null;
+function stopRecording(discard = false) {
+  if (!recorder) return;
+  recorder.discard = discard;
+  if (recorder.mr.state !== 'inactive') recorder.mr.stop();
+}
+$('#cloneRec').onclick = async () => {
+  if (recorder) { stopRecording(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: true}}); }
+  catch { cutMsg('The browser could not use a microphone. Allow microphone access, or choose a file instead.', 'error'); return; }
+  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find(t => window.MediaRecorder?.isTypeSupported(t));
+  const mr = new MediaRecorder(stream, type ? {mimeType: type} : undefined), chunks = [], t0 = Date.now();
+  recorder = {mr, discard: false};
+  const btn = $('#cloneRec'); btn.setAttribute('aria-pressed', 'true');
+  const tick = setInterval(() => { btn.textContent = `■ Stop (${fmtShort((Date.now() - t0) / 1000)})`; }, 250);
+  mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    clearInterval(tick); stream.getTracks().forEach(t => t.stop());
+    btn.textContent = '● Record'; btn.setAttribute('aria-pressed', 'false');
+    const discard = recorder.discard; recorder = null;
+    if (discard || !chunks.length) return;
+    const blob = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
+    const ext = (mr.mimeType || '').includes('mp4') ? 'm4a' : (mr.mimeType || '').includes('ogg') ? 'ogg' : 'webm';
+    const body = new FormData(); body.append('file', blob, `recording.${ext}`);
+    openSource(body, 'your recording');
+  };
+  mr.start(500);
+  cutMsg('Recording… speak naturally for 20–30 seconds, then press Stop.');
+};
+function cutUpdate() {
+  const d = cut.src?.seconds || 0;
+  cut.start = Math.max(0, Math.min(cut.start, d)); cut.end = Math.max(cut.start, Math.min(cut.end, d));
+  if (document.activeElement !== $('#cutStart')) $('#cutStart').value = cut.start.toFixed(1);
+  if (document.activeElement !== $('#cutEnd')) $('#cutEnd').value = cut.end.toFixed(1);
+  const len = cut.end - cut.start, el = $('#cutLen');
+  const [cls, note] = len < 6 ? ['bad', 'too short: needs at least 6 s of speech']
+    : len < 10 ? ['warn', 'works; 10–30 s is better'] : len <= 30 ? ['ok', 'a good length']
+    : ['warn', 'long: the clearest 30 s are used'];
+  el.className = 'cut-len ' + cls; el.textContent = `Selected ${len.toFixed(1)} s · ${note}`;
+  cutDraw();
+}
+function cutDraw() {
+  const cv = $('#cutWave'); if (!cut.src || $('#cutter').hidden) return;
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (!w) return;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  const d = cut.src.seconds, P = cut.src.peaks, x = t => t / d * w;
+  const ink = cssVar('--ink') || '#222', faint = cssVar('--line-strong') || '#bbb';
+  ctx.fillStyle = cssVar('--sunk') || 'rgba(0,0,0,0.04)'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(46,125,79,0.16)'; ctx.fillRect(x(cut.start), 0, x(cut.end) - x(cut.start), h);
+  for (let i = 0; i < w; i++) {
+    const a = Math.floor(i / w * P.length), b = Math.max(a + 1, Math.floor((i + 1) / w * P.length));
+    let p = 0; for (let j = a; j < b && j < P.length; j++) p = Math.max(p, P[j]);
+    const t = (i + 0.5) / w * d, inside = t >= cut.start && t <= cut.end;
+    ctx.fillStyle = inside ? ink : faint;
+    const bh = Math.max(1, p * (h - 6)); ctx.fillRect(i, (h - bh) / 2, 1, bh);
+  }
+  ctx.fillStyle = '#2e7d4f';
+  for (const t of [cut.start, cut.end]) { ctx.fillRect(Math.round(x(t)) - 1, 0, 3, h); ctx.fillRect(Math.round(x(t)) - 5, 0, 11, 6); }
+  if (cut.audio && !cut.audio.paused) { ctx.fillStyle = '#c0392b'; ctx.fillRect(Math.round(x(cut.audio.currentTime)), 0, 2, h); }
+}
+function cutTime(e) {
+  const r = $('#cutWave').getBoundingClientRect();
+  return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (cut.src?.seconds || 0);
+}
+$('#cutWave').addEventListener('pointerdown', e => {
+  if (!cut.src) return;
+  const cv = $('#cutWave'), t = cutTime(e), px = cut.src.seconds / cv.clientWidth * 8;  // 8 px grab zone
+  cut.drag = Math.abs(t - cut.start) <= px ? {edge: 'start'} : Math.abs(t - cut.end) <= px ? {edge: 'end'}
+    : t > cut.start && t < cut.end ? {move: t - cut.start, len: cut.end - cut.start} : {anchor: t};
+  if (cut.drag.anchor !== undefined) { cut.prev = [cut.start, cut.end]; cut.start = cut.end = t; }
+  cv.setPointerCapture(e.pointerId); cutStop(); cutUpdate();
+});
+$('#cutWave').addEventListener('pointermove', e => {
+  if (!cut.drag) { const t = cutTime(e), px = (cut.src?.seconds || 0) / $('#cutWave').clientWidth * 8;
+    $('#cutWave').style.cursor = cut.src && (Math.abs(t - cut.start) <= px || Math.abs(t - cut.end) <= px) ? 'ew-resize' : t > cut.start && t < cut.end ? 'grab' : 'crosshair'; return; }
+  const t = cutTime(e), d = cut.src.seconds, g = cut.drag;
+  if (g.edge === 'start') cut.start = Math.min(t, cut.end - 0.5);
+  else if (g.edge === 'end') cut.end = Math.max(t, cut.start + 0.5);
+  else if (g.move !== undefined) { cut.start = Math.max(0, Math.min(d - g.len, t - g.move)); cut.end = cut.start + g.len; }
+  else { cut.start = Math.min(g.anchor, t); cut.end = Math.max(g.anchor, t); }
+  cutUpdate();
+});
+const cutDrop = () => {
+  if (!cut.drag) return;
+  if (cut.drag.anchor !== undefined && cut.end - cut.start < 0.5) {  // a click, not a drag: play from there
+    const t = cut.start; [cut.start, cut.end] = cut.prev; cutUpdate(); cutPlay(t);
+  }
+  cut.drag = null;
+};
+$('#cutWave').addEventListener('pointerup', cutDrop);
+$('#cutWave').addEventListener('pointercancel', cutDrop);
+$('#cutStart').addEventListener('change', e => { cut.start = Math.min(+e.target.value || 0, cut.end - 0.5); cutUpdate(); e.target.value = cut.start.toFixed(1); });
+$('#cutEnd').addEventListener('change', e => { cut.end = Math.max(+e.target.value || 0, cut.start + 0.5); cutUpdate(); e.target.value = cut.end.toFixed(1); });
+$('#cutBest').onclick = () => { if (cut.src) { [cut.start, cut.end] = cut.src.suggest; cutUpdate(); } };
+$('#cutAll').onclick = () => { if (cut.src) { cut.start = 0; cut.end = cut.src.seconds; cutUpdate(); } };
+function cutStop() {
+  cancelAnimationFrame(cut.raf);
+  if (cut.audio && !cut.audio.paused) cut.audio.pause();
+  $('#cutPlay').textContent = '▷'; $('#cutPlay').setAttribute('aria-label', 'Play the selected part');
+  cutDraw();
+}
+function cutPlay(from) {
+  const a = cut.audio; if (!a) return;
+  if (!a.paused && from === undefined) { cutStop(); return; }
+  const stopAt = from === undefined ? cut.end : cut.src.seconds;
+  a.currentTime = from ?? cut.start;
+  a.play().then(() => {
+    $('#cutPlay').textContent = '❚❚'; $('#cutPlay').setAttribute('aria-label', 'Stop');
+    const loop = () => { if (a.paused || a.currentTime >= stopAt) { cutStop(); return; } cutDraw(); cut.raf = requestAnimationFrame(loop); };
+    loop();
+  }).catch(() => cutMsg('Could not play the recording.', 'error'));
+}
+$('#cutPlay').onclick = () => cutPlay();
+window.addEventListener('resize', () => { if ($('#voiceDialog').open) cutDraw(); });
 $('#openVoices').onclick = openVoices;
 function renderCloneList() {
   const st = state.catalog?.cloning || {}, list = state.catalog?.cloned || [];
-  $('#cloneEngine').innerHTML = st.installed
-    ? '<span class="led on"></span> Cloning engine installed.'
-    : '<span class="led err"></span> Cloning engine not installed yet. You can add voices now, but to <b>use</b> them, stop the studio, run <span class="mono">./setup-cloning.sh</span> once, then start it again.';
+  const [led, text] = st.installed ? ['on', 'Cloning engine installed.']
+    : st.setup === 'installing' ? ['busy', 'The cloning engine is being installed in the background (a large download). You can add voices now; they work as soon as it finishes, without a restart. Progress: <span class="mono">data/logs/setup-cloning.log</span>']
+    : st.setup === 'interrupted' ? ['err', 'Installing the cloning engine stopped part-way. It carries on the next time you run <span class="mono">./start.sh</span> while online (or run <span class="mono">./setup-cloning.sh</span>).']
+    : ['err', 'Cloning engine not installed yet. You can add voices now; to <b>use</b> them, run <span class="mono">./start.sh</span> while online (it installs it in the background), or <span class="mono">./setup-cloning.sh</span>.'];
+  // One wrapper span: .engine-state is a flex row, so loose text and tags would become columns.
+  $('#cloneEngine').innerHTML = `<span class="led ${led}"></span><span>${text}</span>`;
   $('#cloneList').innerHTML = list.length ? list.map(v => `
     <div class="clone-row">
       <button type="button" class="icon-btn" data-sample="${esc(v.slug)}" title="Play the recording" aria-label="Play ${esc(v.name)}'s recording">▷</button>
@@ -797,8 +968,13 @@ $('#cloneForm').addEventListener('submit', async e => {
   e.preventDefault();
   const form = $('#cloneForm'), m = $('#cloneMsg');
   if (!form.reportValidity()) return;
-  const data = new FormData(form);
-  $('#cloneSubmit').disabled = true; m.className = 'msg'; m.textContent = 'Preparing the recording…';
+  if (!cut.src) { cutMsg('Choose a file, record yourself, or pick one of your uploads first.', 'error'); return; }
+  if (cut.end - cut.start < 6) { cutMsg('Select at least 6 seconds of speech (10–30 s works best).', 'error'); return; }
+  const data = new FormData();
+  for (const k of ['name', 'gender', 'consent']) data.append(k, form.elements[k].type === 'checkbox' ? (form.elements[k].checked ? 'yes' : '') : form.elements[k].value);
+  data.append('source', cut.src.id); data.append('start', cut.start.toFixed(2)); data.append('end', cut.end.toFixed(2));
+  cutStop();
+  $('#cloneSubmit').disabled = true; m.className = 'msg'; m.textContent = 'Preparing the voice…';
   try {
     const r = await fetch('/api/voices/clone', {method: 'POST', body: data});
     const j = await r.json().catch(() => ({error: `Upload failed (${r.status})`}));
@@ -806,8 +982,10 @@ $('#cloneForm').addEventListener('submit', async e => {
     await refreshCatalog();
     setSelect($('#voice'), j.voice.id); updateVoiceMode(); changed();
     form.reset(); renderCloneList();
+    cut.src = null; cut.audio = null; $('#cutter').hidden = true;
     m.className = 'msg ok';
-    m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.' : ' Run ./setup-cloning.sh to start using it.');
+    m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.'
+      : j.cloning.setup === 'installing' ? ' It can speak once the cloning engine finishes installing.' : ' Run ./start.sh online (or ./setup-cloning.sh) to start using it.');
   } catch (err) { m.className = 'msg error'; m.textContent = err.message; }
   finally { $('#cloneSubmit').disabled = false; }
 });
@@ -845,6 +1023,7 @@ async function init() {
     buildEmotionUI(); selectStyle('neutral');
     const draft = store.get('kokoro-draft', null);
     state.startFailed = true;
+    state.pron = Array.isArray(draft?.pron) ? draft.pron : []; renderPron();
     if (draft?.text) { script.value = draft.text; $('#projectName').value = draft.name || ''; }
     onEdit();
   }

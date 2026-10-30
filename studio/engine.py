@@ -85,12 +85,14 @@ def _flag(value, default):
 def read_settings(payload, cloned=()):
     """Validate and normalise request settings. `cloned` = ids of cloned voices."""
     voice = payload.get('voice', 'af_heart')
-    if voice not in VOICES and voice not in cloned:
+    if not isinstance(voice, str) or (voice not in VOICES and voice not in cloned):
         raise ValueError('That voice is not available. Pick another in the Voice panel.')
     style = canonical_style(payload.get('style', 'neutral'))
     if not style:
         raise ValueError('Choose a supported delivery style.')
     blend_voice = payload.get('blend_voice') or None
+    if not isinstance(blend_voice, str):
+        blend_voice = None
     if blend_voice is not None and (blend_voice not in VOICES or blend_voice == voice or voice not in VOICES):
         blend_voice = None
     lufs = payload.get('lufs', -16)

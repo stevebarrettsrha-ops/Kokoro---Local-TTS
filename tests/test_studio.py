@@ -411,3 +411,85 @@ def test_recordings_are_paged_and_summarised(tmp_path, monkeypatch):
     assert summary[0]['audio_url'].startswith('/api/audio/')
     (tmp_path / f'{0:032x}.wav').unlink()  # a take whose audio is gone is not listed
     assert c.get('/api/recordings?limit=1').get_json()['total'] == 229
+
+
+def test_voice_cutter_source_suggest_and_cut(tmp_path):
+    from studio.cloning import VoiceLibrary, best_part
+    lib = VoiceLibrary(tmp_path / 'voices')
+    # 90 s: music-free speech only between 40 s and 70 s, silence elsewhere.
+    y = np.zeros(24000 * 90, np.float32)
+    y[24000 * 40:24000 * 70] = _speechy(30)
+    src = tmp_path / 'podcast.wav'
+    sf.write(src, y, 48000 // 2)
+    opened = lib.open_source(src, 'podcast.wav')
+    assert opened['seconds'] == pytest.approx(90, abs=0.01) and len(opened['peaks']) == 1600
+    a, b = opened['suggest']
+    assert 40 <= a and b <= 70.5 and b - a == pytest.approx(20)  # the best part lies inside the speech
+    assert best_part(y[:24000 * 12]) == (0.0, 12.0)  # short recordings: all of it
+    voice = lib.add_from_source(opened['id'], 45, 65, 'Pod Host', 'Male')
+    assert voice['id'] == 'clone:pod-host' and 18 <= voice['seconds'] <= 21
+    meta = json.loads((tmp_path / 'voices' / 'pod-host.json').read_text())
+    assert meta['cut'] == [45, 65] and meta['source_file'] == 'podcast.wav'
+    assert lib.source_path(opened['id']) is None  # the opened recording is cleaned up
+    with pytest.raises(ValueError, match='no longer open'):
+        lib.add_from_source(opened['id'], 0, 10, 'Again')
+    second = lib.open_source(src, 'podcast.wav')
+    with pytest.raises(ValueError, match='at least 6'):
+        lib.add_from_source(second['id'], 0, 3, 'Silence')  # selected only silence -> too little speech
+    assert lib.source_path('../../etc/passwd') is None and not lib.delete_source('nope')
+
+
+def test_voice_cutter_routes_with_video_and_media(cloning_engine, monkeypatch, tmp_path):
+    import io
+    import shutil
+    import subprocess
+    import app as server
+    from studio import video as vid
+    monkeypatch.setattr(server, 'engine', cloning_engine)
+    c = server.app.test_client()
+    r = c.post('/api/voices/sources', data={'file': (io.BytesIO(_wav_bytes(_speechy(15))), 'me.wav')})
+    src = r.get_json()['source']
+    assert src['suggest'] == [0.0, 15.0]
+    assert c.get(f'/api/voices/sources/{src["id"]}/audio').mimetype == 'audio/wav'
+    r = c.post('/api/voices/clone', data={'name': 'Cut', 'source': src['id'], 'start': '2', 'end': '14'})
+    assert r.status_code == 400 and 'permission' in r.get_json()['error']
+    r = c.post('/api/voices/clone', data={'name': 'Cut', 'consent': 'yes', 'source': src['id'], 'start': '2', 'end': '14'})
+    assert r.get_json()['voice']['id'] == 'clone:cut'
+    assert c.post('/api/voices/sources', data={'file': (io.BytesIO(b'not audio'), 'x.mp3')}).status_code == 400
+    if not shutil.which('ffmpeg'):
+        return
+    # The sound of a video, and a file from the video editor's uploads.
+    wav = tmp_path / 's.wav'
+    sf.write(wav, _speechy(12), 24000)
+    mp4 = tmp_path / 'clip.mp4'
+    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=160x120:d=12', '-i', str(wav),
+                    '-shortest', '-c:v', 'libx264', '-c:a', 'aac', str(mp4)], check=True)
+    r = c.post('/api/voices/sources', data={'file': (io.BytesIO(mp4.read_bytes()), 'clip.mp4')})
+    assert r.get_json()['source']['seconds'] == pytest.approx(12, abs=0.2)
+    lib = vid.MediaLibrary(tmp_path / 'media')
+    monkeypatch.setattr(server, 'media', lib)
+    m = lib.add(mp4.read_bytes(), 'Interview.mp4')
+    r = c.post('/api/voices/sources', data={'media': m['id']})
+    assert r.get_json()['source']['name'] == 'Interview'
+    assert c.post('/api/voices/sources', data={'media': 'f' * 32}).status_code == 400
+
+
+def test_clone_worker_waits_for_background_setup(tmp_path):
+    import os
+    import subprocess
+    (tmp_path / '.venv-chatterbox' / 'bin').mkdir(parents=True)
+    (tmp_path / '.venv-chatterbox' / 'bin' / 'python').write_text('')
+    (tmp_path / 'cloning').mkdir()
+    (tmp_path / 'cloning' / 'chatterbox_worker.py').write_text('')
+    w = CloneWorker(root=tmp_path)
+    assert w.available() and w.status()['setup'] is None
+    lock = tmp_path / '.venv-chatterbox.installing'
+    lock.write_text(str(os.getpid()))  # a live process: setup still running
+    assert not w.available() and w.status()['setup'] == 'installing'
+    with pytest.raises(RuntimeError, match='still being installed'):
+        w.speak('hi', tmp_path / 'x.wav')
+    proc = subprocess.Popen(['true']); proc.wait()
+    lock.write_text(str(proc.pid))  # setup stopped part-way
+    assert not w.available() and w.status()['setup'] == 'interrupted'
+    lock.unlink()
+    assert w.available()

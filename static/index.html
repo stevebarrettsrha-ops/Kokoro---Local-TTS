@@ -232,7 +232,7 @@
           <button data-bin="shapes" role="tab">Shapes</button>
         </div>
         <div class="ve-bin-body" data-pane="media">
-          <label class="ve-drop" id="veDrop">
+          <label class="ve-drop" id="veDrop" tabindex="0" role="button" aria-label="Upload pictures, video or music">
             <input type="file" id="veFiles" multiple accept="image/*,video/*,audio/*,.mov,.mkv,.m4a,.flac" hidden>
             <b>Upload pictures, video or music</b>
             <span class="muted">or drop files here</span>
@@ -337,7 +337,7 @@
     <p><strong>Check line at cursor</strong> shows the sounds Kokoro will use, so you can see exactly what it reads.</p>
 
     <h2>Your own voices</h2>
-    <p>In the Voice panel, <strong>Add a voice from a recording…</strong> makes a voice from 10–30 seconds of a real person speaking. Chatterbox reproduces their sound, accent and delivery. Only use your own voice, or one you have permission to use. Run <span class="mono">./setup-cloning.sh</span> once before using cloned voices. Emotions still work, pace is approximate, and <strong>Try another read</strong> gives a fresh take if one line comes out wrong.</p>
+    <p>In the Voice panel, <strong>Add a voice from a recording…</strong> makes a voice from 10–30 seconds of a real person speaking. Chatterbox reproduces their sound, accent and delivery. Only use your own voice, or one you have permission to use. Choose a file (audio or video, any length), record yourself, or pick one of your video uploads, then drag across the waveform to select the part to use. The first <span class="mono">./start.sh</span> installs the cloning engine in the background. Emotions still work, pace is approximate, and <strong>Try another read</strong> gives a fresh take if one line comes out wrong.</p>
 
     <h2>Making the video</h2>
     <p>Click <strong>→ Video</strong> after rendering (or <strong>Add to video</strong> in Takes) to put a voice on the video timeline. In the Video tab's <em>Voices</em> panel, <strong>Add with captions</strong> also places the spoken words as on-screen text, timed to the voice. Add pictures and clips under <em>Uploads</em>; they play one after another on the Main track. Hover between two scenes and click <strong>+</strong> for a transition, and give text and pictures an entrance or exit in the right-hand panel. Then click <strong>Export MP4</strong>. Your projects and exports are kept in the app's <span class="mono">creations/</span> folder.</p>
@@ -407,11 +407,30 @@
         <select class="input" name="gender"><option value="">—</option><option>Male</option><option>Female</option></select>
       </label>
     </div>
-    <label class="mini">Recording <span class="muted">(WAV, MP3, FLAC, OGG; M4A with ffmpeg)</span>
-      <input class="input" type="file" name="file" id="cloneFile" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" required>
-    </label>
+    <div class="mini">Recording <span class="muted">(any audio or video file; long ones are fine, you choose the part to use)</span></div>
+    <div class="clone-source">
+      <label class="btn file-btn">Choose a file…
+        <input type="file" id="cloneFile" accept="audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.opus,.webm,.mp4,.mov,.mkv">
+      </label>
+      <button type="button" class="btn" id="cloneRec" aria-pressed="false">● Record</button>
+      <select class="input" id="cloneMedia" aria-label="Use sound from your video uploads">
+        <option value="">From your video uploads…</option>
+      </select>
+    </div>
+    <div class="cutter" id="cutter" hidden>
+      <div class="cutter-head"><span id="cutName" class="muted"></span><span id="cutLen" class="cut-len"></span></div>
+      <canvas id="cutWave" tabindex="-1" aria-label="Waveform of the recording. Drag to choose the part to use; drag the edges to adjust."></canvas>
+      <div class="cutter-bar">
+        <button type="button" class="icon-btn" id="cutPlay" aria-label="Play the selected part" title="Play the selected part">▷</button>
+        <label class="mini cut-time">From <input class="input" type="number" id="cutStart" min="0" step="0.1" inputmode="decimal"> s</label>
+        <label class="mini cut-time">To <input class="input" type="number" id="cutEnd" min="0" step="0.1" inputmode="decimal"> s</label>
+        <button type="button" class="link-btn" id="cutBest" title="Select the 20 seconds with the most clear speech">Best part</button>
+        <button type="button" class="link-btn" id="cutAll">Whole recording</button>
+      </div>
+      <p class="muted cut-help">Drag across the waveform to choose what the voice is made from. Pick one person speaking, with no music.</p>
+    </div>
     <ul class="tips">
-      <li><b>10–30 seconds</b> of one person talking naturally. The cleanest 10 seconds matter most, and the studio picks them for you.</li>
+      <li><b>10–30 seconds</b> of one person talking naturally. Select that part above; the cleanest 10 seconds inside it matter most, and the studio puts them first.</li>
       <li>Quiet room, no music, no echo, no other voices. A phone held about 20 cm (8 in) away works well.</li>
       <li>Speak the way the voice should sound in your videos. A calm, warm read makes a calm, warm voice.</li>
     </ul>
