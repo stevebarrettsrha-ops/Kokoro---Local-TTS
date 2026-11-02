@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, Request, abort, jsonify, request, send_file, send_from_directory
 
+from studio.cloning import CloningNotReady
 from studio.engine import Engine
 from studio.engine import bounded as engine_bounded
 from studio import video as vid
@@ -143,6 +144,8 @@ def _payload():
 def _failure(exc):
     if isinstance(exc, ValueError):
         return jsonify({'error': str(exc)}), 400
+    if isinstance(exc, CloningNotReady):  # a state the UI explains, not a crash: no traceback
+        return jsonify({'error': str(exc)}), 409
     app.logger.exception('Voice generation failed')
     message = str(exc)
     if 'OfflineModeIsEnabled' in type(exc).__name__ or 'offline mode' in message.lower():
@@ -575,6 +578,40 @@ def export_delete(name):
     return jsonify({'ok': True})
 
 
+def report_cloning_setup():
+    """Print the background cloning install's progress in this terminal (it otherwise only goes
+    to data/logs/setup-cloning.log), so it's clear it is moving and when it is done."""
+    import threading
+    import time
+
+    def watch():
+        last, last_stage, printed, started = None, None, 0.0, time.time()
+        while True:
+            state = engine.cloner.setup_state()
+            prog = engine.cloner.setup_progress() or {}
+            pk = prog.get('packages')
+            stage = prog.get('stage') or 'Working'
+            line = stage
+            if (prog.get('detail') or '').startswith('downloaded '):
+                line += ' — ' + prog['detail']
+            elif pk:
+                line += f' — {pk[0]} of {pk[1]} large packages downloaded'
+            if state != 'installing':
+                if last is None and time.time() - started < 15:  # start.sh launches it a moment earlier
+                    time.sleep(1)
+                    continue
+                if last is not None:  # it was running while we watched
+                    print('[voice cloning] ' + ('Ready: cloned voices can speak now.' if engine.cloner.available()
+                          else 'Setup stopped. See data/logs/setup-cloning.log'), flush=True)
+                return
+            # A new step is shown at once; byte counts at most once a minute.
+            if line != last and (stage != last_stage or time.time() - printed >= 60):
+                print(f'[voice cloning] {line}  (details: tail -f data/logs/setup-cloning.log)', flush=True)
+                last, last_stage, printed = line, stage, time.time()
+            time.sleep(5)
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def recover():
     """Tidy up after the previous run and restart an export it didn't finish."""
     media.recover()
@@ -597,6 +634,7 @@ if __name__ == '__main__':
         raise SystemExit(1)
     recover()
     print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
+    report_cloning_setup()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

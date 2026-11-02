@@ -963,14 +963,42 @@ function cutPlay(from) {
 $('#cutPlay').onclick = () => cutPlay();
 window.addEventListener('resize', () => { if ($('#voiceDialog').open) cutDraw(); });
 $('#openVoices').onclick = openVoices;
-function renderCloneList() {
-  const st = state.catalog?.cloning || {}, list = state.catalog?.cloned || [];
+// Live progress of the background install, from its log.
+function setupProgress(p) {
+  if (!p) return '';
+  const pk = p.packages ? ` · ${p.packages[0]} of ${p.packages[1]} large packages downloaded` : '';
+  const quiet = p.idle > 120 ? ` · no new output for ${Math.round(p.idle / 60)} min (a big file may still be downloading)` : '';
+  return `<br><b>${esc(p.stage || 'Working')}</b>${pk}${quiet}` +
+    (p.detail ? `<br><span class="mono muted setup-detail">${esc(p.detail)}</span>` : '');
+}
+// While it installs and the dialog is open, refresh the status every few seconds.
+let setupPoll = 0;
+function pollSetup() {
+  clearTimeout(setupPoll);
+  if (!$('#voiceDialog').open || state.catalog?.cloning?.setup !== 'installing') return;
+  setupPoll = setTimeout(async () => {
+    try {
+      const before = state.catalog?.cloning?.installed, cat = await api('/api/voices');
+      state.catalog = {...state.catalog, ...cat};
+      renderCloneEngine();
+      if (cat.cloning?.installed && !before) { cutMsg('The cloning engine is ready: your voices can speak now.', 'ok'); renderVoiceOptions(); }
+    } catch { /* try again */ }
+    pollSetup();
+  }, 4000);
+}
+function renderCloneList() { renderCloneEngine(); renderCloneListItems(); }
+function renderCloneEngine() {
+  const st = state.catalog?.cloning || {};
   const [led, text] = st.installed ? ['on', 'Cloning engine installed.']
-    : st.setup === 'installing' ? ['busy', 'The cloning engine is being installed in the background (a large download). You can add voices now; they work as soon as it finishes, without a restart. Progress: <span class="mono">data/logs/setup-cloning.log</span>']
+    : st.setup === 'installing' ? ['busy', 'The cloning engine is being installed in the background (a large download). You can add voices now; they work as soon as it finishes, without a restart.' + setupProgress(st.progress)]
     : st.setup === 'interrupted' ? ['err', 'Installing the cloning engine stopped part-way. It carries on the next time you run <span class="mono">./start.sh</span> while online (or run <span class="mono">./setup-cloning.sh</span>).']
     : ['err', 'Cloning engine not installed yet. You can add voices now; to <b>use</b> them, run <span class="mono">./start.sh</span> while online (it installs it in the background), or <span class="mono">./setup-cloning.sh</span>.'];
   // One wrapper span: .engine-state is a flex row, so loose text and tags would become columns.
   $('#cloneEngine').innerHTML = `<span class="led ${led}"></span><span>${text}</span>`;
+  pollSetup();
+}
+function renderCloneListItems() {
+  const list = state.catalog?.cloned || [];
   $('#cloneList').innerHTML = list.length ? list.map(v => `
     <div class="clone-row">
       <button type="button" class="icon-btn" data-sample="${esc(v.slug)}" title="Play the recording" aria-label="Play ${esc(v.name)}'s recording">▷</button>
