@@ -110,7 +110,7 @@ ffmpeg is required: `sudo apt install ffmpeg`.
 | `[voice=george]` | Switch speaker for dialogue; `[voice=default]` switches back |
 | `[speed=1.1]` | Relative pace for the following text |
 | `*word*` | Emphasis |
-| `[Yahuah](yah-HOO-ah)` | Sounds-like pronunciation for one spot; CAPS marks the stressed syllable |
+| `[Yahuah](Yah-uh-ah)` | Sounds-like pronunciation for one spot; CAPS marks the stressed syllable |
 | `[live](liv)` | Same, for a single word |
 | `[Kokoro](/kˈOkəɹO/)` | Exact phonemes (ordinary IPA is converted for you) |
 | blank line | Paragraph pause |
@@ -122,12 +122,13 @@ The 12 emotions are neutral, warm, joyful, excited, curious, confident, calm, sa
 Kokoro guesses unfamiliar words from their spelling. The **Pronunciation** list in the side panel fixes a word in every take. You can write the sound three ways:
 
 - sounds-like: `liv`
-- syllables, with the stressed one in CAPS: `yah-HOO-ah`
-- phonemes: `/jɑhˈuɑ/`
+- syllables, with the stressed one in CAPS (otherwise the first is stressed): `Yah-uh-ah`, `kah-DAHSH`
+- phonemes: `/jˈɑəɑ/`
 
 Sounds-like spellings are converted with Kokoro's own pronunciation engine, so they behave the same way it reads ordinary words.
 
-- **Add Hebrew names** loads about 60 Scripture and Hebrew-roots names: Yahuah, Yahusha, Elohim, Qadash, Qodesh, Shamayim, Mishlei, Torah, Shabbat, Yerushalayim and more. Every entry can be edited.
+- About 60 Scripture and Hebrew-roots names are said correctly automatically (Yahuah = *YAH-uh-ah*, Yahusha, Elohim, Qadash, Qodesh, Shamayim, Mishlei, Torah, Shabbat, Yerushalayim and more). Untick **Say Hebrew & Scripture names correctly** to turn this off. Words in your own list win; **Edit Hebrew names** copies the built-in ones into your list so you can change any of them.
+- Syllable spellings follow the usual respelling key (*ah, eh, ee, oh, oo, uh, ay, eye, kh, sh*), so made-up syllables come out as written and flow as one word.
 - **▷** plays a word on its own.
 - **Check line at cursor** shows exactly which sounds Kokoro will use.
 - **"Live"** is read as *liv* unless the next word makes it the broadcast sense (*live stream*, *live music*) or it closes a phrase like *we go live*. Override any spot with `[live](lyve)`.
@@ -157,7 +158,7 @@ Built-in Kokoro voices can't be changed into a different person, so the studio c
 Cloned voices appear under *Your voices*. They also work in dialogue with `[voice=Marcus]`.
 
 **What works with cloned voices:**
-- Scripts, pauses, captions, loudness and the Hebrew name pack. For cloned voices, pronunciations use the sounds-like spelling, e.g. *yah-hoo-ah*.
+- Scripts, pauses, captions, loudness and the Hebrew name pack. For cloned voices, pronunciations use the sounds-like spelling, e.g. *yah-uh-ah*. Cloned voices read each paragraph in one go (up to about 300 characters) so it sounds like one continuous read, not stitched sentences.
 - Emotion buttons and the gauge set Chatterbox's emotion strength.
 - Pace is approximate.
 - Each read varies slightly; **Try another read** re-renders with a different take.

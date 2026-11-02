@@ -135,9 +135,9 @@
         <div class="slider"><label for="punct">Comma &amp; stop pauses</label><output id="punctOut"></output>
           <input type="range" id="punct" min="0.5" max="2.5" step="0.05" value="1"></div>
         <div class="slider"><label for="sentence_gap">Between sentences</label><output id="sentence_gapOut"></output>
-          <input type="range" id="sentence_gap" min="0" max="1500" step="10" value="300"></div>
+          <input type="range" id="sentence_gap" min="0" max="1500" step="10" value="260"></div>
         <div class="slider"><label for="paragraph_gap">Between paragraphs</label><output id="paragraph_gapOut"></output>
-          <input type="range" id="paragraph_gap" min="0" max="3000" step="25" value="700"></div>
+          <input type="range" id="paragraph_gap" min="0" max="3000" step="25" value="420"></div>
       </section>
 
       <section class="group">
@@ -185,14 +185,15 @@
 
       <section class="group">
         <h2>Pronunciation <span class="muted h-note" id="pronCount">applies to every take</span></h2>
+        <label class="check-line"><input type="checkbox" id="name_pack" checked> Say Hebrew &amp; Scripture names correctly <span class="muted">(Yahuah = YAH-uh-ah and about 60 more; your own words below win)</span></label>
         <div id="pronList" class="pron-list"></div>
         <div class="row two pron-actions">
           <button class="btn ghost" id="addPron">Add word</button>
-          <button class="btn ghost" id="addPack" title="Yahuah, Elohim, Qadash, Shamayim, Mishlei, Torah and about 60 more">Add Hebrew names</button>
+          <button class="btn ghost" id="addPack" title="Copy the built-in names into your list so you can change how any of them is said">Edit Hebrew names</button>
         </div>
         <button class="btn ghost wide" id="checkLine" title="Show the sounds Kokoro will use for the line at the cursor">Check line at cursor</button>
         <div class="pron-check" id="pronCheck" hidden></div>
-        <p class="note">Say it like: <span class="mono">liv</span> (sounds-like), <span class="mono">yah-HOO-ah</span> (syllables, CAPS = stress) or <span class="mono">/jɑhˈuɑ/</span> (phonemes). For one spot only, write <span class="mono">[live](liv)</span> in the script.</p>
+        <p class="note">Say it like: <span class="mono">liv</span> (sounds-like), <span class="mono">Yah-uh-ah</span> (syllables, CAPS = stress, else the first) or <span class="mono">/jˈɑəɑ/</span> (phonemes). For one spot only, write <span class="mono">[live](liv)</span> in the script.</p>
       </section>
 
       <button class="link-btn reset" id="resetBtn">Reset direction to defaults</button>

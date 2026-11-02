@@ -29,8 +29,8 @@ The boats go out in the dark. [beat] By sunrise, they're already halfway to the 
 
 const DEFAULTS = {
   voice: 'af_heart', blend_voice: '', blend: 0.3, blend_mode: 'full', style: 'neutral', intensity: 60,
-  speed: 1, pitch: 0, range: 1, energy: 0, punct: 1.1, sentence_gap: 300, paragraph_gap: 700,
-  preset: 'youtube', lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false,
+  speed: 1, pitch: 0, range: 1, energy: 0, punct: 1.1, sentence_gap: 260, paragraph_gap: 420,
+  preset: 'youtube', lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false, name_pack: true,
 };
 
 const state = {
@@ -211,6 +211,7 @@ function readSettings() {
     punct: +$('#punct').value, sentence_gap: +$('#sentence_gap').value, paragraph_gap: +$('#paragraph_gap').value,
     preset: $('#preset').value, lufs: $('#lufs').value, rate: $('#rate').value, peak: $('#peak').value,
     target: $('#target').value, polish: $('#polish').checked, room_tone: $('#room_tone').checked, mp3: $('#mp3').checked,
+    name_pack: $('#name_pack').checked,
   };
 }
 function setSelect(el, v) { if (v !== undefined && [...el.options].some(o => o.value === String(v))) el.value = String(v); }
@@ -225,7 +226,7 @@ function applySettings(s) {
   });
   ['preset', 'lufs', 'rate', 'peak'].forEach(k => setSelect($('#' + k), s[k]));
   $('#target').value = s.target || '';
-  ['polish', 'room_tone', 'mp3'].forEach(k => { $('#' + k).checked = !!s[k]; });
+  ['polish', 'room_tone', 'mp3', 'name_pack'].forEach(k => { $('#' + k).checked = !!s[k]; });
   setBlendMode(s.blend_mode);
   state.intensity = clamp(Number(s.intensity) || 0, 0, 120);
   selectStyle(s.style);
@@ -257,7 +258,7 @@ function renderPron() {
     <div class="pron">
       <input class="input" data-i="${i}" data-k="word" value="${esc(p.word)}" placeholder="Word" aria-label="Word">
       <span class="arrow">→</span>
-      <input class="input mono-ish" data-i="${i}" data-k="say" value="${esc(p.say)}" placeholder="yah-HOO-ah" aria-label="Say it like"${p.hint ? ` title="Sounds like: ${esc(p.hint)}"` : ''}>
+      <input class="input mono-ish" data-i="${i}" data-k="say" value="${esc(p.say)}" placeholder="Yah-uh-ah" aria-label="Say it like"${p.hint ? ` title="Sounds like: ${esc(p.hint)}"` : ''}>
       <button class="icon-btn" data-test="${i}" aria-label="Hear this word" title="Hear it">▷</button>
       <button class="icon-btn" data-del="${i}" aria-label="Remove" title="Remove">×</button>
     </div>`).join('');
@@ -396,7 +397,7 @@ function estimate(items, s) {
   const out = [];
   for (const it of items) {
     if (it.kind === 'pause') {
-      const ms = it.para ? s.paragraph_gap + (prev ? prev.gap : 0) : it.ms;
+      const ms = it.para ? s.paragraph_gap + (prev ? prev.gap : 0) / 2 : it.ms;
       out.push({kind: 'pause', dur: ms / 1000, para: !!it.para});
       t += ms / 1000; prev = it.para ? prev : null; continue;
     }

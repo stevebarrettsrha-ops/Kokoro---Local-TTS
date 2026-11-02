@@ -18,7 +18,7 @@ import soundfile as sf
 from . import audio as fx
 from . import captions as cc
 from .cloning import CLONE_PREFIX, CloneWorker, VoiceLibrary
-from .phonemes import PACKS, make_resolver
+from .phonemes import PACKS, make_resolver, with_pack
 from .prosody import Shape, patch_model, shaping
 from .script import parse_script
 from .styles import OUTPUT_PRESETS, STYLES, blend_style, canonical_style
@@ -113,15 +113,16 @@ def read_settings(payload, cloned=()):
         'range': bounded(payload.get('range', 1), 0.4, 1.8, 1),
         'energy': bounded(payload.get('energy', 0), -1, 1, 0),
         'punct': bounded(payload.get('punct', 1), 0.5, 2.5, 1),
-        'sentence_gap': int(bounded(payload.get('sentence_gap', 300), 0, 2000, 300)),
-        'paragraph_gap': int(bounded(payload.get('paragraph_gap', 700), 0, 4000, 700)),
+        'sentence_gap': int(bounded(payload.get('sentence_gap', 260), 0, 2000, 260)),
+        'paragraph_gap': int(bounded(payload.get('paragraph_gap', 420), 0, 4000, 420)),
         'blend_voice': blend_voice,
         'blend': bounded(payload.get('blend', 0.3), 0, 1, 0.3) if blend_voice else 0.0,
         'blend_mode': 'delivery' if payload.get('blend_mode') == 'delivery' else 'full',
         'lufs': lufs, 'peak': bounded(payload.get('peak', -1), -6, 0, -1), 'rate': rate,
         'polish': _flag(payload.get('polish'), True), 'room_tone': _flag(payload.get('room_tone'), False),
         'mp3': _flag(payload.get('mp3'), False), 'target_seconds': target,
-        'pronunciations': [r for r in rules[:500] if isinstance(r, dict)],
+        'pronunciations': with_pack([r for r in rules[:500] if isinstance(r, dict)],
+                                    _flag(payload.get('name_pack'), True)),
         'heteronyms': _flag(payload.get('heteronyms'), True),
         'variation': int(bounded(payload.get('variation', 0), 0, 9999, 0)),
     }
@@ -293,7 +294,8 @@ class Engine:
         cfg_weight = bounded(0.5 - max(0.0, exag - 0.6) * 0.35 + (pace - 1) * 0.6, 0.15, 0.85, 0.5)
         seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
         y = self.cloner.speak(item['plain'], ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
-        y, _cut = fx.trim(np.asarray(y, dtype=np.float32))
+        # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
+        y, _cut = fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)
         if not y.size:
             raise RuntimeError(f'The cloned voice produced no audio for: "{item["text"][:60]}"')
         if abs(cfg['pitch']) > 0.04:
@@ -302,12 +304,36 @@ class Engine:
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': [], 'style': style,
                 'voice': voice, 'gap': moves['gap'], 'text': item['text']}
 
+    def _join_cloned(self, items, cfg):
+        """Give cloned voices whole runs of a paragraph at once.
+
+        Chatterbox reads each call as a fresh utterance, so sentence-by-sentence
+        sounds like separate takes stitched together. Consecutive sentences
+        with the same voice and direction are read in one call (up to a length
+        it handles well), which keeps the intonation flowing between them.
+        """
+        keys = ('voice', 'style', 'intensity', 'speed')
+        out = []
+        for item in items:
+            prev = out[-1] if out else None
+            voice = item.get('voice') or cfg['voice']
+            if (item['kind'] == 'speech' and prev and prev['kind'] == 'speech'
+                    and voice.startswith(CLONE_PREFIX) and all(prev.get(k) == item.get(k) for k in keys)
+                    and len(prev['plain']) + len(item['plain']) < CLONE_JOIN_CHARS):
+                out[-1] = {**prev, 'text': f"{prev['text']} {item['text']}", 'speak': f"{prev['speak']} {item['speak']}",
+                           'plain': f"{prev['plain']} {item['plain']}"}
+                continue
+            out.append(dict(item))
+        return out
+
     def _render_pass(self, items, cfg, speed_scale):
         timeline, last = [], None
         for i, item in enumerate(items):
             if item['kind'] == 'pause':
                 if item.get('para'):
-                    extra = last['gap'] if last else 0
+                    # Half the style's sentence-end pause: a full one on top of the
+                    # paragraph gap makes paragraph breaks drag.
+                    extra = last['gap'] / 2 if last else 0
                     ms = max(0, cfg['paragraph_gap'] + extra)
                     timeline.append({'kind': 'gap', 'ms': ms, 'flex': True})
                 else:
@@ -328,6 +354,7 @@ class Engine:
             raise ValueError('The script has no speakable text.')
         if len(items) > MAX_ITEMS:
             raise ValueError('The script is too long for one take. Split it into parts.')
+        items = self._join_cloned(items, cfg)
         timeline = self._render_pass(items, cfg, 1.0)
         info = {'passes': 1}
         target = cfg['target_seconds']
@@ -408,6 +435,9 @@ class Engine:
         }
         (self.out / f'{rid}.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
         return meta
+
+
+CLONE_JOIN_CHARS = 300
 
 
 def _gap_after(seg, cfg):

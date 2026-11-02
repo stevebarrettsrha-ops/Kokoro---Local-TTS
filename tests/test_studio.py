@@ -235,6 +235,10 @@ def test_respelling_and_ipa():
     assert respell('yah-HOO-ah', fake_g2p) == 'jɑhˈuɑ'
     assert respell('shah-MAH-yeem', fake_g2p) == 'ʃɑmˈɑjim'
     assert respell('liv', fake_g2p) == 'lˈɪv'
+    # Made-up syllables follow the respelling key, not a dictionary, and need no G2P.
+    assert respell('Yah-uh-ah') == 'jˈɑəɑ'
+    assert respell('shah-DYE') == 'ʃɑdˈI' and respell('ROO-akh') == 'ɹˈuɑk'
+    assert respell('beh-ray-SHEET') == 'bɛɹAʃˈit' and respell('el-OH-ah', british=True) == 'ɛlˈQɑ'
     assert normalize_ipa('/jaˈhuːa/') == 'jɑˈhuɑ'
     assert normalize_ipa("/ʃaˈmajim/") == 'ʃɑˈmɑjim'
     assert normalize_ipa('/maɪ/') == 'mI'
@@ -264,8 +268,15 @@ def test_engine_phonemize_and_pack_in_catalog(engine):
     from studio.engine import public_catalog
     assert len(public_catalog()['packs']['hebrew']['words']) >= 50
     engine.pipelines['a'].g2p = lambda t: (f'<{t}>', [])
+    out = engine.phonemize({'text': 'Praise Yahuah.', 'pronunciations': [{'word': 'Yahuah', 'say': '/jɑəɑ/'}]})
+    assert out['sentences'][0]['phonemes'] == '<Praise [Yahuah](/jɑəɑ/).>'
+    # The built-in names apply without adding them, and the old Yahuah value is upgraded.
+    out = engine.phonemize({'text': 'Praise Yahuah and Elohim.'})
+    assert out['sentences'][0]['phonemes'] == '<Praise [Yahuah](/jˈɑəˌɑ/) and [Elohim](/ɛlOhˈim/).>'
     out = engine.phonemize({'text': 'Praise Yahuah.', 'pronunciations': [{'word': 'Yahuah', 'say': '/jɑhˈuɑ/'}]})
-    assert out['sentences'][0]['phonemes'] == '<Praise [Yahuah](/jɑhˈuɑ/).>'
+    assert '[Yahuah](/jˈɑəˌɑ/)' in out['sentences'][0]['phonemes']
+    out = engine.phonemize({'text': 'Praise Yahuah.', 'name_pack': False})
+    assert out['sentences'][0]['phonemes'] == '<Praise Yahuah.>'
 
 
 # ---------- cloned voices ----------
@@ -328,7 +339,26 @@ def test_cloned_voice_render_with_emotion_and_pronunciation(cloning_engine):
     srt = (e.out / f'{meta["id"]}.srt').read_text()
     assert 'Praise Yahuah, he is Qadash.' in srt  # captions keep the real spelling
     out = e.phonemize({'text': 'Praise Yahuah, he is Qadash.', 'voice': 'clone:marcus', 'pronunciations': rules})
-    assert out['sentences'][0]['phonemes'] == 'Praise yah-hoo-ah, he is kah-dahsh.'
+    assert out['sentences'][0]['phonemes'] == 'Praise yah-uh-ah, he is kah-dahsh.'
+
+
+def test_cloned_voice_reads_a_paragraph_in_one_go(cloning_engine):
+    e = cloning_engine
+    sent = []
+    real = e.cloner.speak
+    e.cloner.speak = lambda text, *a, **k: (sent.append(text), real(text, *a, **k))[1]
+    e.synthesize({'text': 'The first line is here. The second line follows it.\n\nA new paragraph starts now.',
+                  'voice': 'clone:marcus', 'rate': 24000})
+    assert sent == ['The first line is here. The second line follows it.', 'A new paragraph starts now.']
+
+
+def test_paragraph_pause_is_moderate(engine):
+    cfg = engine.read_settings({'text': 'x', 'style': 'calm'})
+    assert cfg['paragraph_gap'] == 420
+    items = [{'kind': 'speech', 'text': 'One.', 'speak': 'One.', 'plain': 'One.', 'style': None,
+              'intensity': None, 'voice': None, 'speed': 1.0}, {'kind': 'pause', 'ms': None, 'para': True}]
+    gap = engine._render_pass(items, cfg, 1.0)[-1]
+    assert gap['kind'] == 'gap' and gap['ms'] < 500
 
 
 def test_cloned_voice_errors_are_reported(cloning_engine, tmp_path):
