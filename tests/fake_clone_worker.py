@@ -9,8 +9,8 @@ for line in sys.stdin:
     if req.get('text') == 'CRASH':
         sys.exit(3)
     text = req['text']
-    if 'Dropped' in text and '. ' in text:
-        text = text.split('. ')[0]  # act like Chatterbox ending a long take early
+    if 'Flaky' in text and req.get('seed', 0) % 2 == 0:
+        text = text[:len(text) // 3]  # act like Chatterbox ending a take early
     n = int(24000 * (0.1 + len(text) / 15))
     t = np.arange(n) / 24000
     y = (0.2 * np.sin(2 * np.pi * (110 + 100 * req['exaggeration']) * t)).astype(np.float32)

@@ -342,26 +342,31 @@ def test_cloned_voice_render_with_emotion_and_pronunciation(cloning_engine):
     assert out['sentences'][0]['phonemes'] == 'Praise yah-uh-ah, he is kah-dahsh.'
 
 
-def test_cloned_voice_reads_a_paragraph_in_one_go(cloning_engine):
+def test_cloned_voice_reads_long_sentences_in_pieces(cloning_engine):
     e = cloning_engine
     sent = []
     real = e.cloner.speak
     e.cloner.speak = lambda text, *a, **k: (sent.append(text), real(text, *a, **k))[1]
-    e.synthesize({'text': 'The first line is here. The second line follows it.\n\nA new paragraph starts now.',
+    long = ('Wisdom has built her house, She has hewn out its seven columns, She has slaughtered her meat, '
+            'She has mixed her wine, She has also prepared her table.')
+    e.synthesize({'text': f'{long}\n\nThe fear of "Yahuah" is the beginning (the start) of wisdom.',
                   'voice': 'clone:marcus', 'rate': 24000})
-    assert sent == ['The first line is here. The second line follows it.', 'A new paragraph starts now.']
+    assert len(sent) == 3 and all(len(t) <= 130 for t in sent)
+    assert ' '.join(sent[:2]) == long
+    assert sent[2] == 'The fear of yah-uh-ah is the beginning, the start, of wisdom.'  # no quotes or brackets
 
 
-def test_cloned_voice_rereads_a_paragraph_it_cut_short(cloning_engine):
+def test_cloned_voice_retries_a_take_that_stopped_early(cloning_engine):
     e = cloning_engine
-    sent = []
+    seeds = []
     real = e.cloner.speak
-    e.cloner.speak = lambda text, *a, **k: (sent.append(text), real(text, *a, **k))[1]
-    meta = e.synthesize({'text': 'The first line is spoken here. Dropped words would be lost without a check.',
-                         'voice': 'clone:marcus', 'rate': 24000})
-    assert sent[0].startswith('The first') and sent[0].endswith('check.')
-    assert sent[1:] == ['The first line is spoken here.', 'Dropped words would be lost without a check.']
-    assert meta['seconds'] > 4  # both sentences made it into the take
+    e.cloner.speak = lambda text, *a, **k: (seeds.append(k['seed']), real(text, *a, **k))[1]
+    text = 'Flaky takes like this one would be cut short without a check.'
+    for v in range(4):  # whatever the first seed, a full take is found
+        seeds.clear()
+        meta = e.synthesize({'text': text, 'voice': 'clone:marcus', 'rate': 24000, 'variation': v})
+        assert meta['seconds'] > len(text) / 15 * 0.8
+        assert len(seeds) == (1 if seeds[0] % 2 else 2)
 
 
 def test_paragraph_pause_is_moderate(engine):
