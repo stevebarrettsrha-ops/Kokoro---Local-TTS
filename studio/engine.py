@@ -292,10 +292,38 @@ class Engine:
         exag = bounded(exag, 0.25, 1.6, 0.5)
         pace = cfg['speed'] * item['speed'] * moves['speed'] * speed_scale
         cfg_weight = bounded(0.5 - max(0.0, exag - 0.6) * 0.35 + (pace - 1) * 0.6, 0.15, 0.85, 0.5)
-        seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
-        y = self.cloner.speak(item['plain'], ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
-        # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
-        y, _cut = fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)
+        base_seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
+
+        def take(text, seed):
+            y = self.cloner.speak(text, ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
+            # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
+            return fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)[0]
+
+        def checked(text, seed, tries):
+            """Chatterbox sometimes stops early (dropping the rest of the text) or
+            runs on; retry with another seed and keep the best-fitting take."""
+            best = None
+            for n in range(tries):
+                y = take(text, (seed + n * 104729) % 2_147_483_647)
+                ok, miss = _clone_fits(y, text, pace)
+                if ok:
+                    return y, True
+                if best is None or miss < best[1]:
+                    best = (y, miss)
+            return best[0], False
+
+        parts = item.get('parts')
+        y, ok = checked(item['plain'], base_seed, 1 if parts else CLONE_TRIES)
+        if not ok and parts:
+            # The joined paragraph came out incomplete: read it sentence by sentence.
+            pieces = []
+            for i, part in enumerate(parts):
+                piece, _ = checked(part['plain'], base_seed + i + 1, CLONE_TRIES)
+                if pieces and piece.size:
+                    ms = _gap_after({'text': parts[i - 1]['text'], 'gap': moves['gap']}, cfg)
+                    pieces.append(np.zeros(int(SR * ms / 1000), dtype=np.float32))
+                pieces.append(fx.fade_edges(piece))
+            y = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
         if not y.size:
             raise RuntimeError(f'The cloned voice produced no audio for: "{item["text"][:60]}"')
         if abs(cfg['pitch']) > 0.04:
@@ -321,7 +349,7 @@ class Engine:
                     and voice.startswith(CLONE_PREFIX) and all(prev.get(k) == item.get(k) for k in keys)
                     and len(prev['plain']) + len(item['plain']) < CLONE_JOIN_CHARS):
                 out[-1] = {**prev, 'text': f"{prev['text']} {item['text']}", 'speak': f"{prev['speak']} {item['speak']}",
-                           'plain': f"{prev['plain']} {item['plain']}"}
+                           'plain': f"{prev['plain']} {item['plain']}", 'parts': prev.get('parts', [prev]) + [item]}
                 continue
             out.append(dict(item))
         return out
@@ -437,7 +465,25 @@ class Engine:
         return meta
 
 
-CLONE_JOIN_CHARS = 300
+CLONE_JOIN_CHARS = 240
+CLONE_TRIES = 3
+CLONE_CHARS_PER_S = 15.0  # typical Chatterbox reading rate at normal pace
+
+
+def _clone_fits(y, text, pace=1.0):
+    """(looks complete, how far off) for a cloned take of `text`.
+
+    Too short means Chatterbox ended early and skipped words; far too long
+    usually means it repeated itself or babbled.
+    """
+    chars = len(re.sub(r'\s+', ' ', text).strip())
+    expected = chars / (CLONE_CHARS_PER_S * max(0.5, pace))
+    got = len(y) / SR
+    if chars < 20:
+        return got > 0.15, 0.0
+    ratio = got / max(0.3, expected)
+    ok = 0.5 <= ratio <= 2.3 + 2.0 / max(1.0, expected)
+    return ok, abs(np.log(max(ratio, 1e-3)))
 
 
 def _gap_after(seg, cfg):

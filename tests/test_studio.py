@@ -352,6 +352,18 @@ def test_cloned_voice_reads_a_paragraph_in_one_go(cloning_engine):
     assert sent == ['The first line is here. The second line follows it.', 'A new paragraph starts now.']
 
 
+def test_cloned_voice_rereads_a_paragraph_it_cut_short(cloning_engine):
+    e = cloning_engine
+    sent = []
+    real = e.cloner.speak
+    e.cloner.speak = lambda text, *a, **k: (sent.append(text), real(text, *a, **k))[1]
+    meta = e.synthesize({'text': 'The first line is spoken here. Dropped words would be lost without a check.',
+                         'voice': 'clone:marcus', 'rate': 24000})
+    assert sent[0].startswith('The first') and sent[0].endswith('check.')
+    assert sent[1:] == ['The first line is spoken here.', 'Dropped words would be lost without a check.']
+    assert meta['seconds'] > 4  # both sentences made it into the take
+
+
 def test_paragraph_pause_is_moderate(engine):
     cfg = engine.read_settings({'text': 'x', 'style': 'calm'})
     assert cfg['paragraph_gap'] == 420
