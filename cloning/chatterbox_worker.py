@@ -60,22 +60,6 @@ def tts(req):
     return {'sr': model.sr, 'samples': int(y.size)}
 
 
-VC = None
-
-
-def vc(req):
-    """Re-voice an existing recording (Kokoro's exact pronunciation) as the clone."""
-    global VC
-    model = load()
-    if VC is None:
-        from chatterbox.vc import ChatterboxVC
-        VC = ChatterboxVC(model.s3gen, model.device)  # shares the loaded weights
-    wav = VC.generate(req['src'], target_voice_path=req['ref'])
-    y = wav.squeeze().detach().cpu().numpy().astype(np.float32)
-    np.save(req['out'], y)
-    return {'sr': VC.sr, 'samples': int(y.size)}
-
-
 def main():
     for line in sys.stdin:
         line = line.strip()
@@ -85,8 +69,6 @@ def main():
             req = json.loads(line)
             if req.get('op') == 'tts':
                 reply(ok=True, **tts(req))
-            elif req.get('op') == 'vc':
-                reply(ok=True, **vc(req))
             elif req.get('op') == 'load':
                 load()
                 reply(ok=True)

@@ -220,9 +220,7 @@ def parse_script(source, voices=None, pronunciations=None, resolve=None, heteron
                 if not re.search(r'\w', shown):
                     continue
                 speak = prepare_speech(sentence, pronunciations, resolve, heteronyms)
-                # Has a name/word with set sounds (not just the automatic "live" fix)?
-                exact = '](/' in prepare_speech(sentence, pronunciations, resolve, False)
-                items.append({'kind': 'speech', 'text': shown, 'speak': speak, 'exact': exact,
+                items.append({'kind': 'speech', 'text': shown, 'speak': speak,
                               'plain': prepare_plain(sentence, pronunciations), **state})
             if i < len(paragraphs) - 1:
                 items.append({'kind': 'pause', 'ms': None, 'para': True})
