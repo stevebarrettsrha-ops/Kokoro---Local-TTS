@@ -8,6 +8,12 @@ for line in sys.stdin:
     req = json.loads(line)
     if req.get('text') == 'CRASH':
         sys.exit(3)
+    if req.get('op') == 'vc':
+        import soundfile as sf
+        src, sr = sf.read(req['src'], dtype='float32')
+        np.save(req['out'], (src * 0.9).astype(np.float32))
+        print(json.dumps({'ok': True, 'sr': sr, 'samples': len(src), 'echo': req}), flush=True)
+        continue
     text = req['text']
     if 'Flaky' in text and req.get('seed', 0) % 2 == 0:
         text = text[:len(text) // 3]  # act like Chatterbox ending a take early

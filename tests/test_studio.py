@@ -350,7 +350,7 @@ def test_cloned_voice_reads_long_sentences_in_pieces(cloning_engine):
     long = ('Wisdom has built her house, She has hewn out its seven columns, She has slaughtered her meat, '
             'She has mixed her wine, She has also prepared her table.')
     e.synthesize({'text': f'{long}\n\nThe fear of "Yahuah" is the beginning (the start) of wisdom.',
-                  'voice': 'clone:marcus', 'rate': 24000})
+                  'voice': 'clone:marcus', 'rate': 24000, 'clone_exact': False})
     assert len(sent) == 3 and all(len(t) <= 130 for t in sent)
     assert ' '.join(sent[:2]) == long
     assert sent[2] == 'The fear of yah-uh-ah is the beginning, the start, of wisdom.'  # no quotes or brackets
@@ -367,6 +367,24 @@ def test_cloned_voice_retries_a_take_that_stopped_early(cloning_engine):
         meta = e.synthesize({'text': text, 'voice': 'clone:marcus', 'rate': 24000, 'variation': v})
         assert meta['seconds'] > len(text) / 15 * 0.8
         assert len(seeds) == (1 if seeds[0] % 2 else 2)
+
+
+def test_cloned_voice_says_hebrew_names_exactly(cloning_engine):
+    e = cloning_engine
+    said, converted = [], []
+    real_speak, real_convert = e.cloner.speak, e.cloner.convert
+    e.cloner.speak = lambda text, *a, **k: (said.append(text), real_speak(text, *a, **k))[1]
+    e.cloner.convert = lambda y, *a, **k: (converted.append(len(y)), real_convert(y, *a, **k))[1]
+    meta = e.synthesize({'text': 'The fear of Yahuah is the beginning of wisdom. Leave the simple ones and live.',
+                         'voice': 'clone:marcus', 'rate': 24000})
+    # The Yahuah line went through Kokoro (exact sounds) and was re-voiced; the other was read directly.
+    assert '[Yahuah](/jˈɑəˌɑ/)' in e.pipelines['a'].calls[-1]['text'] and e.pipelines['a'].calls[-1]['voice'] == 'am_michael'
+    assert len(converted) == 1 and said == ['Leave the simple ones and live.']
+    assert [s['voice'] for s in meta['segments']] == ['clone:marcus', 'clone:marcus']
+    # Turned off: the respelling is read instead.
+    said.clear()
+    e.synthesize({'text': 'Praise Yahuah.', 'voice': 'clone:marcus', 'rate': 24000, 'clone_exact': False})
+    assert said == ['Praise yah-uh-ah.']
 
 
 def test_paragraph_pause_is_moderate(engine):

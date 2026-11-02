@@ -158,7 +158,7 @@ Built-in Kokoro voices can't be changed into a different person, so the studio c
 Cloned voices appear under *Your voices*. They also work in dialogue with `[voice=Marcus]`.
 
 **What works with cloned voices:**
-- Scripts, pauses, captions, loudness and the Hebrew name pack. For cloned voices, pronunciations use the sounds-like spelling, e.g. *yah-uh-ah*. Chatterbox can lose its place on long text (re-reading the start or jumping to the end), so cloned voices read one sentence at a time, and long sentences in clause-sized pieces (up to about 130 characters). Quote marks and brackets are smoothed out for them. Every cloned take is checked against the length of its text; one that stopped early or ran on is retried (up to 3 tries, best kept).
+- Scripts, pauses, captions, loudness and the Hebrew name pack. Cloned voices can't read phonemes, so a line containing a name or word from the pronunciation list is spoken by Kokoro (exact sounds) and then turned into the cloned voice with Chatterbox's voice conversion. Other lines are read by the cloned voice directly. Untick **Cloned voices say these words exactly** to have it read the sounds-like spelling (e.g. *yah-uh-ah*) instead. Chatterbox can lose its place on long text (re-reading the start or jumping to the end), so cloned voices read one sentence at a time, and long sentences in clause-sized pieces (up to about 130 characters). Quote marks and brackets are smoothed out for them. Every cloned take is checked against the length of its text; one that stopped early or ran on is retried (up to 3 tries, best kept).
 - Emotion buttons and the gauge set Chatterbox's emotion strength.
 - Pace is approximate.
 - Each read varies slightly; **Try another read** re-renders with a different take.

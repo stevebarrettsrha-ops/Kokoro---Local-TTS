@@ -30,7 +30,7 @@ The boats go out in the dark. [beat] By sunrise, they're already halfway to the 
 const DEFAULTS = {
   voice: 'af_heart', blend_voice: '', blend: 0.3, blend_mode: 'full', style: 'neutral', intensity: 60,
   speed: 1, pitch: 0, range: 1, energy: 0, punct: 1.1, sentence_gap: 260, paragraph_gap: 420,
-  preset: 'youtube', lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false, name_pack: true,
+  preset: 'youtube', lufs: '-14', rate: '48000', peak: '-1', target: '', polish: true, room_tone: false, mp3: false, name_pack: true, clone_exact: true,
 };
 
 const state = {
@@ -211,7 +211,7 @@ function readSettings() {
     punct: +$('#punct').value, sentence_gap: +$('#sentence_gap').value, paragraph_gap: +$('#paragraph_gap').value,
     preset: $('#preset').value, lufs: $('#lufs').value, rate: $('#rate').value, peak: $('#peak').value,
     target: $('#target').value, polish: $('#polish').checked, room_tone: $('#room_tone').checked, mp3: $('#mp3').checked,
-    name_pack: $('#name_pack').checked,
+    name_pack: $('#name_pack').checked, clone_exact: $('#clone_exact').checked,
   };
 }
 function setSelect(el, v) { if (v !== undefined && [...el.options].some(o => o.value === String(v))) el.value = String(v); }
@@ -226,7 +226,7 @@ function applySettings(s) {
   });
   ['preset', 'lufs', 'rate', 'peak'].forEach(k => setSelect($('#' + k), s[k]));
   $('#target').value = s.target || '';
-  ['polish', 'room_tone', 'mp3', 'name_pack'].forEach(k => { $('#' + k).checked = !!s[k]; });
+  ['polish', 'room_tone', 'mp3', 'name_pack', 'clone_exact'].forEach(k => { $('#' + k).checked = !!s[k]; });
   setBlendMode(s.blend_mode);
   state.intensity = clamp(Number(s.intensity) || 0, 0, 120);
   selectStyle(s.style);

@@ -459,6 +459,24 @@ class CloneWorker:
                 out.unlink()
         return y
 
+    def convert(self, y, ref_path, sr=SR):
+        """Turn a recording (e.g. Kokoro speech) into the cloned voice."""
+        self.scratch.mkdir(parents=True, exist_ok=True)
+        src = self.scratch / f'{uuid.uuid4().hex}.wav'
+        out = self.scratch / f'{uuid.uuid4().hex}.npy'
+        try:
+            sf.write(str(src), np.asarray(y, dtype=np.float32), sr, subtype='FLOAT')
+            reply = self._call({'op': 'vc', 'src': str(src), 'ref': str(ref_path), 'out': str(out)})
+            y = np.load(out).astype(np.float32).reshape(-1)
+            rate = int(reply.get('sr') or SR)
+            if rate != SR:
+                y = fx.resample(y, rate, SR)
+        finally:
+            for f in (src, out):
+                if f.exists():
+                    f.unlink()
+        return y
+
     def status(self):
         state = self.setup_state()
         return {'installed': self.available(), 'running': bool(self.proc and self.proc.poll() is None),

@@ -124,6 +124,7 @@ def read_settings(payload, cloned=()):
         'pronunciations': with_pack([r for r in rules[:500] if isinstance(r, dict)],
                                     _flag(payload.get('name_pack'), True)),
         'heteronyms': _flag(payload.get('heteronyms'), True),
+        'clone_exact': _flag(payload.get('clone_exact'), True),
         'variation': int(bounded(payload.get('variation', 0), 0, 9999, 0)),
     }
 
@@ -238,7 +239,7 @@ class Engine:
         moves = blend_style(style, intensity)
         voice = item['voice'] or cfg['voice']
         if voice.startswith(CLONE_PREFIX):
-            return self._speak_cloned(item, cfg, speed_scale, style, intensity, moves, voice)
+            return self._speak_cloned(item, cfg, speed_scale, style, intensity, moves, voice, index)
         pipe = self.pipeline(voice[0])
         if voice == cfg['voice']:
             ref = self.voice_ref(pipe, voice, cfg['blend_voice'], cfg['blend'], cfg['blend_mode'])
@@ -277,7 +278,29 @@ class Engine:
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': words, 'style': style,
                 'voice': voice, 'gap': moves['gap'], 'text': item['text']}
 
-    def _speak_cloned(self, item, cfg, speed_scale, style, intensity, moves, voice):
+    def _speak_cloned_exact(self, item, cfg, speed_scale, index, voice, ref, moves):
+        """Kokoro reads the line (exact phonemes), then Chatterbox re-voices it.
+
+        Chatterbox only reads English spelling, so names like Yahuah come out
+        wrong or get skipped; Kokoro takes phonemes. Voice conversion keeps the
+        words and timing and swaps in the cloned voice.
+        """
+        gender = (self.library.get(voice) or {}).get('gender')
+        base = 'am_michael' if gender == 'Male' else 'af_heart'
+        seg = self._speak({**item, 'voice': base}, {**cfg, 'pitch': 0, 'blend_voice': None}, speed_scale, index)
+        y = self.cloner.convert(seg['audio'], ref)
+        y, _cut = fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)
+        if not y.size:
+            raise RuntimeError('voice conversion produced no audio')
+        if abs(cfg['pitch']) > 0.04:
+            y = _fallback_pitch(y, cfg['pitch'])
+        # Kokoro's word timings still fit: conversion keeps the timing.
+        scale = len(y) / max(1, len(seg['audio']))
+        words = [dict(w, start=w['start'] * scale, end=w['end'] * scale) for w in seg['words']]
+        return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': words, 'style': seg['style'],
+                'voice': voice, 'gap': moves['gap'], 'text': item['text']}
+
+    def _speak_cloned(self, item, cfg, speed_scale, style, intensity, moves, voice, index=0):
         """Render one sentence with a cloned voice through Chatterbox.
 
         Emotion maps to Chatterbox's exaggeration; pace maps to its CFG weight
@@ -286,6 +309,12 @@ class Engine:
         ref = self.library.ref_path(voice)
         if ref is None:
             raise ValueError('That cloned voice was deleted. Pick another voice.')
+        if cfg.get('clone_exact', True) and item.get('exact'):
+            try:
+                return self._speak_cloned_exact(item, cfg, speed_scale, index, voice, ref, moves)
+            except Exception as err:  # noqa: BLE001 - fall back to reading the respelling
+                print(f'[cloning] exact pronunciation unavailable ({err}); reading the respelling instead.',
+                      flush=True)
         k = min(1.25, intensity)
         exag = 0.5 + (CLONE_EXPR.get(style, 0.5) - 0.5) * k
         exag += 0.3 * (cfg['range'] - 1) + 0.15 * cfg['energy']
