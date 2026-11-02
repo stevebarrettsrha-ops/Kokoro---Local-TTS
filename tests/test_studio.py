@@ -351,9 +351,8 @@ def test_cloned_voice_reads_long_sentences_in_pieces(cloning_engine):
             'She has mixed her wine, She has also prepared her table.')
     e.synthesize({'text': f'{long}\n\nThe fear of "Yahuah" is the beginning (the start) of wisdom.',
                   'voice': 'clone:marcus', 'rate': 24000})
-    assert len(sent) == 3 and all(len(t) <= 130 for t in sent)
-    assert ' '.join(sent[:2]) == long
-    assert sent[2] == 'The fear of yah-uh-ah is the beginning, the start, of wisdom.'  # no quotes or brackets
+    assert sent[0] == long  # a normal sentence is read whole, so its intonation flows
+    assert sent[1] == 'The fear of yah-uh-ah is the beginning, the start, of wisdom.'  # no quotes or brackets
 
 
 def test_cloned_voice_retries_a_take_that_stopped_early(cloning_engine):
@@ -633,3 +632,11 @@ def test_setup_progress_is_read_from_the_log(tmp_path):
             assert server._failure(CloningNotReady('installing'))[1] == 409
     finally:
         setup.kill(); setup.wait()
+
+
+def test_cloned_voice_pauses_are_shorter_and_long_sentences_split_rarely():
+    from studio.engine import _clause_chunks, _gap_scale
+    assert _gap_scale({'voice': 'clone:marcus'}) < 0.7 and _gap_scale({'voice': 'af_heart'}) == 1.0
+    assert len(_clause_chunks('word, ' * 30 + 'end.')) == 1  # ~180 characters: read whole
+    pieces = _clause_chunks('a long clause here, ' * 20 + 'end.')
+    assert len(pieces) == 2 and all(len(p) <= 240 for p in pieces)
