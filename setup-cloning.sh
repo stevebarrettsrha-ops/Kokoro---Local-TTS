@@ -22,8 +22,15 @@ for f in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenize
 PY
 }
 
-# Already done? (Older installs have no .ready marker: check them once and add it.)
-if [ -x .venv-chatterbox/bin/python ] && { [ -f "$ready" ] || .venv-chatterbox/bin/python -c 'import chatterbox' >/dev/null 2>&1; } && weights_cached; then
+# Chatterbox's watermarker (resemble-perth) needs pkg_resources from setuptools, which uv
+# environments don't include (and setuptools 81+ is dropping). Without it the watermarker is
+# silently None and every cloned read fails with "'NoneType' object is not callable".
+engine_loads() {
+  .venv-chatterbox/bin/python -c 'import perth, chatterbox, sys; sys.exit(0 if perth.PerthImplicitWatermarker else 1)' >/dev/null 2>&1
+}
+
+# Already done? (Older installs have no .ready marker, or lack setuptools: check and repair them.)
+if [ -x .venv-chatterbox/bin/python ] && engine_loads && weights_cached; then
   touch "$ready"; rm -f "$lock"
   echo 'Voice cloning: ready'
   exit 0
@@ -49,7 +56,7 @@ if [ ! -x .venv-chatterbox/bin/python ]; then
   uv venv --python 3.11 .venv-chatterbox
 fi
 echo 'Installing Chatterbox (large download: PyTorch + model code)...'
-uv pip install --python .venv-chatterbox/bin/python "chatterbox-tts==0.1.7"
+uv pip install --python .venv-chatterbox/bin/python "chatterbox-tts==0.1.7" "setuptools<81"
 
 echo 'Downloading the Chatterbox model (about 3 GB; safe to rerun if interrupted)...'
 .venv-chatterbox/bin/python - <<'PY'
@@ -85,6 +92,8 @@ for f in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenize
 done.set()
 print("   model complete", flush=True)
 import chatterbox  # noqa: F401  (fails here, not in the studio, if the install is broken)
+import perth
+assert perth.PerthImplicitWatermarker, "the Chatterbox watermarker could not load (setuptools/pkg_resources missing)"
 import torch
 print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none (CPU mode, slow)")
 PY
