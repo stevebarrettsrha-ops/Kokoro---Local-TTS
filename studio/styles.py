@@ -55,21 +55,21 @@ ALIASES = {'tender': 'warm', 'whisper': 'soft', 'happy': 'joyful', 'scared': 'fe
 # Starting points for common video and audio deliverables.
 OUTPUT_PRESETS = {
     'youtube':   {'label': 'YouTube narration', 'lufs': -14, 'peak': -1.0, 'rate': 48000,
-                  'speed': 1.0, 'sentence_gap': 300, 'paragraph_gap': 700, 'punct': 1.1},
+                  'speed': 1.0, 'sentence_gap': 260, 'paragraph_gap': 420, 'punct': 1.1},
     'explainer': {'label': 'Explainer / tutorial', 'lufs': -16, 'peak': -1.0, 'rate': 48000,
-                  'speed': 0.97, 'sentence_gap': 340, 'paragraph_gap': 800, 'punct': 1.15},
+                  'speed': 0.97, 'sentence_gap': 300, 'paragraph_gap': 500, 'punct': 1.15},
     'documentary': {'label': 'Documentary', 'lufs': -16, 'peak': -1.0, 'rate': 48000,
-                    'speed': 0.92, 'sentence_gap': 450, 'paragraph_gap': 1000, 'punct': 1.3},
+                    'speed': 0.92, 'sentence_gap': 400, 'paragraph_gap': 650, 'punct': 1.3},
     'shorts':    {'label': 'Shorts / Reels / TikTok', 'lufs': -14, 'peak': -1.0, 'rate': 48000,
-                  'speed': 1.1, 'sentence_gap': 150, 'paragraph_gap': 320, 'punct': 0.85},
+                  'speed': 1.1, 'sentence_gap': 150, 'paragraph_gap': 250, 'punct': 0.85},
     'ad':        {'label': 'Ad / promo', 'lufs': -14, 'peak': -1.0, 'rate': 48000,
-                  'speed': 1.05, 'sentence_gap': 220, 'paragraph_gap': 450, 'punct': 0.95},
+                  'speed': 1.05, 'sentence_gap': 200, 'paragraph_gap': 320, 'punct': 0.95},
     'podcast':   {'label': 'Podcast', 'lufs': -16, 'peak': -1.0, 'rate': 44100,
-                  'speed': 1.0, 'sentence_gap': 320, 'paragraph_gap': 700, 'punct': 1.1},
+                  'speed': 1.0, 'sentence_gap': 280, 'paragraph_gap': 450, 'punct': 1.1},
     'broadcast': {'label': 'Broadcast (EBU R128)', 'lufs': -23, 'peak': -1.0, 'rate': 48000,
-                  'speed': 1.0, 'sentence_gap': 320, 'paragraph_gap': 700, 'punct': 1.1},
+                  'speed': 1.0, 'sentence_gap': 280, 'paragraph_gap': 450, 'punct': 1.1},
     'audiobook': {'label': 'Audiobook', 'lufs': -20, 'peak': -3.0, 'rate': 44100,
-                  'speed': 0.95, 'sentence_gap': 420, 'paragraph_gap': 1100, 'punct': 1.25},
+                  'speed': 0.95, 'sentence_gap': 380, 'paragraph_gap': 700, 'punct': 1.25},
 }
 
 

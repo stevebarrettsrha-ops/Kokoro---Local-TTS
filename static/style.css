@@ -336,3 +336,4 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
 .cut-time { display: flex; align-items: center; gap: 4px; }
 .cut-time input { width: 84px; }
 .cut-help { font-size: 12px; margin: 6px 0 0; }
+.check-line { display: flex; gap: 8px; align-items: baseline; font-size: 13px; margin-bottom: 10px; }

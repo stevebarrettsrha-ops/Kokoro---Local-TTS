@@ -136,13 +136,18 @@ def prepare_plain(sentence, rules=None):
             return word
         return _plain_say(f) or word
     text = LINK_RE.sub(link, sentence)
+    table = {}
     for rule in rules or []:
         word = str(rule.get('word', '')).strip()
         say = _plain_say(rule.get('say', ''), rule.get('hint', ''))
-        if not word or not say or len(word) > 60 or len(say) > 160:
-            continue
-        pattern = re.compile(r'(?<![\w\[])' + re.escape(word) + r'(?![\w\]])', re.I)
-        text = pattern.sub(lambda _m, say=say: say, text)
+        if word and say and len(word) <= 60 and len(say) <= 160:
+            table.setdefault(word.lower(), say)  # first rule wins, as with Kokoro voices
+    if table:
+        # One pass, longest words first, so a replacement is never re-matched
+        # ("Yah" must not touch the "yah" in Yahuah's "yah-uh-ah").
+        alts = '|'.join(re.escape(w) for w in sorted(table, key=len, reverse=True))
+        pattern = re.compile(r'(?<![\w\[])(?:' + alts + r')(?![\w\]])', re.I)
+        text = pattern.sub(lambda m: table[m.group(0).lower()], text)
     text = EMPHASIS_RE.sub(lambda m: m.group(1), text)
     return ' '.join(text.split())
 
