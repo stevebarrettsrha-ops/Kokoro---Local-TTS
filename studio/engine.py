@@ -296,8 +296,8 @@ class Engine:
 
         def take(text, seed):
             y = self.cloner.speak(text, ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
-            # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
-            return fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)[0]
+            # Cut dead air and hiss, but keep the natural decay at the end of the line.
+            return fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-45.0, tail_ms=110)[0]
 
         def checked(text, seed, tries):
             """Chatterbox sometimes stops early (dropping the rest of the text) or
@@ -318,7 +318,7 @@ class Engine:
         for i, chunk in enumerate(_clause_chunks(item['plain'])):
             piece, _ = checked(chunk, base_seed + i * 7, CLONE_TRIES)
             if pieces and piece.size:
-                ms = _gap_after({'text': ',', 'gap': moves['gap']}, cfg)
+                ms = 40  # pieces of one sentence: just a breath, not a pause
                 pieces.append(np.zeros(int(SR * ms / 1000), dtype=np.float32))
             if piece.size:
                 pieces.append(fx.fade_edges(piece))
@@ -339,13 +339,13 @@ class Engine:
                     # Half the style's sentence-end pause: a full one on top of the
                     # paragraph gap makes paragraph breaks drag.
                     extra = last['gap'] / 2 if last else 0
-                    ms = max(0, cfg['paragraph_gap'] + extra)
+                    ms = max(0, cfg['paragraph_gap'] + extra) * _gap_scale(last)
                     timeline.append({'kind': 'gap', 'ms': ms, 'flex': True})
                 else:
                     timeline.append({'kind': 'gap', 'ms': item['ms'], 'flex': False})
                 continue
             if last is not None and timeline and timeline[-1]['kind'] == 'speech':
-                timeline.append({'kind': 'gap', 'ms': _gap_after(last, cfg), 'flex': True})
+                timeline.append({'kind': 'gap', 'ms': _gap_after(last, cfg) * _gap_scale(last), 'flex': True})
             seg = self._speak(item, cfg, speed_scale, i)
             seg['kind'] = 'speech'
             timeline.append(seg)
@@ -441,7 +441,7 @@ class Engine:
         return meta
 
 
-CLONE_CHUNK_CHARS = 130
+CLONE_CHUNK_CHARS = 240
 CLONE_TRIES = 3
 CLONE_CHARS_PER_S = 15.0  # typical Chatterbox reading rate at normal pace
 
@@ -483,6 +483,15 @@ def _clone_fits(y, text, pace=1.0):
     ratio = got / max(0.3, expected)
     ok = 0.6 <= ratio <= 1.7 + 1.5 / max(1.0, expected)
     return ok, abs(np.log(max(ratio, 1e-3)))
+
+
+def _gap_scale(seg):
+    """Cloned takes end with their own natural trail-off (kept on purpose), so
+    the silence added after them is shorter than after a tightly-cut Kokoro line."""
+    return CLONE_GAP_SCALE if seg and str(seg.get('voice', '')).startswith(CLONE_PREFIX) else 1.0
+
+
+CLONE_GAP_SCALE = 0.55
 
 
 def _gap_after(seg, cfg):
