@@ -26,6 +26,12 @@ def reply(**data):
 def load():
     global MODEL
     if MODEL is None:
+        import perth
+        if perth.PerthImplicitWatermarker is None:
+            # resemble-perth hides its import error and Chatterbox then calls None().
+            raise RuntimeError('The cloning engine is missing a package (setuptools). Fix: stop the studio, run '
+                               './setup-cloning.sh (or: uv pip install --python .venv-chatterbox/bin/python '
+                               '"setuptools<81"), then start it again.')
         from chatterbox.tts import ChatterboxTTS
         device = os.environ.get('CHATTERBOX_DEVICE') or ('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'[cloning] loading Chatterbox on {device}…', flush=True)

@@ -160,6 +160,12 @@ else
   SKIP_SPACY_CHECK=1 bash ./download-models.sh || echo 'WARNING: the model download did not finish; it is retried on the next start.' >&2
   # Cloned voices need ~9 GB more. That installs in the background so the studio can be
   # used right away; cloned voices start working when it finishes, without a restart.
+  # An install made before the setuptools fix is marked ready but can't load the watermarker:
+  # clear the mark so the setup repairs it (a quick, small install).
+  if [ -f .venv-chatterbox/.ready ] && [ -z "${CHATTERBOX_PYTHON:-}" ] && \
+     ! .venv-chatterbox/bin/python -c 'import importlib.util as u, sys; sys.exit(0 if u.find_spec("pkg_resources") else 1)' >/dev/null 2>&1; then
+    rm -f .venv-chatterbox/.ready
+  fi
   if ! truthy "${SKIP_CLONING:-0}" && [ -z "${CHATTERBOX_PYTHON:-}" ] && [ ! -f .venv-chatterbox/.ready ]; then
     free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
     if ! command -v uv >/dev/null 2>&1; then
