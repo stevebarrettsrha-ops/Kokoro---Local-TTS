@@ -149,6 +149,19 @@ def prepare_plain(sentence, rules=None):
         pattern = re.compile(r'(?<![\w\[])(?:' + alts + r')(?![\w\]])', re.I)
         text = pattern.sub(lambda m: table[m.group(0).lower()], text)
     text = EMPHASIS_RE.sub(lambda m: m.group(1), text)
+    return _calm_for_cloning(text)
+
+
+def _calm_for_cloning(text):
+    """Chatterbox stumbles on quote marks (often unbalanced once a quote spans
+    sentences) and brackets; they add nothing to speech, so smooth them out."""
+    text = re.sub(r'\s*[(\[]\s*', ', ', text)
+    text = re.sub(r'\s*[)\]]\s*(?=[,.;:!?])', '', text)
+    text = re.sub(r'\s*[)\]]\s*', ', ', text)
+    text = re.sub(r'["“”„«»]', '', text)
+    text = re.sub(r"(?<!\w)[‘’'](?=\w)|(?<=[\w.,!?])[‘’'](?!\w)", '', text)  # quote marks, not apostrophes
+    text = re.sub(r'\s*,\s*(?=[,.;:!?])', '', text)
+    text = re.sub(r'^\s*,\s*', '', text)
     return ' '.join(text.split())
 
 
@@ -169,6 +182,19 @@ def display_text(text):
     """What a viewer should read in captions: no markup, original words."""
     text = LINK_RE.sub(lambda m: m.group(1), text)
     text = EMPHASIS_RE.sub(lambda m: m.group(1), text)
+    return _calm_for_cloning(text)
+
+
+def _calm_for_cloning(text):
+    """Chatterbox stumbles on quote marks (often unbalanced once a quote spans
+    sentences) and brackets; they add nothing to speech, so smooth them out."""
+    text = re.sub(r'\s*[(\[]\s*', ', ', text)
+    text = re.sub(r'\s*[)\]]\s*(?=[,.;:!?])', '', text)
+    text = re.sub(r'\s*[)\]]\s*', ', ', text)
+    text = re.sub(r'["“”„«»]', '', text)
+    text = re.sub(r"(?<!\w)[‘’'](?=\w)|(?<=[\w.,!?])[‘’'](?!\w)", '', text)  # quote marks, not apostrophes
+    text = re.sub(r'\s*,\s*(?=[,.;:!?])', '', text)
+    text = re.sub(r'^\s*,\s*', '', text)
     return ' '.join(text.split())
 
 

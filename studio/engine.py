@@ -292,10 +292,37 @@ class Engine:
         exag = bounded(exag, 0.25, 1.6, 0.5)
         pace = cfg['speed'] * item['speed'] * moves['speed'] * speed_scale
         cfg_weight = bounded(0.5 - max(0.0, exag - 0.6) * 0.35 + (pace - 1) * 0.6, 0.15, 0.85, 0.5)
-        seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
-        y = self.cloner.speak(item['plain'], ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
-        # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
-        y, _cut = fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)
+        base_seed = (zlib.crc32(item['plain'].encode('utf-8')) + cfg['variation'] * 7919) % 2_147_483_647
+
+        def take(text, seed):
+            y = self.cloner.speak(text, ref, exaggeration=exag, cfg_weight=cfg_weight, seed=seed)
+            # Chatterbox trails off with breath and hiss; trim tighter than Kokoro.
+            return fx.trim(np.asarray(y, dtype=np.float32), threshold_db=-40.0, tail_ms=60)[0]
+
+        def checked(text, seed, tries):
+            """Chatterbox sometimes stops early (dropping the rest of the text) or
+            runs on; retry with another seed and keep the best-fitting take."""
+            best = None
+            for n in range(tries):
+                y = take(text, (seed + n * 104729) % 2_147_483_647)
+                ok, miss = _clone_fits(y, text, pace)
+                if ok:
+                    return y, True
+                if best is None or miss < best[1]:
+                    best = (y, miss)
+            return best[0], False
+
+        # Chatterbox loses its place on long text (re-reading the start or jumping
+        # to the end), so long sentences are read in clause-sized pieces.
+        pieces = []
+        for i, chunk in enumerate(_clause_chunks(item['plain'])):
+            piece, _ = checked(chunk, base_seed + i * 7, CLONE_TRIES)
+            if pieces and piece.size:
+                ms = _gap_after({'text': ',', 'gap': moves['gap']}, cfg)
+                pieces.append(np.zeros(int(SR * ms / 1000), dtype=np.float32))
+            if piece.size:
+                pieces.append(fx.fade_edges(piece))
+        y = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
         if not y.size:
             raise RuntimeError(f'The cloned voice produced no audio for: "{item["text"][:60]}"')
         if abs(cfg['pitch']) > 0.04:
@@ -303,28 +330,6 @@ class Engine:
         y = y * fx.db_to_amp(moves['gain'])
         return {'audio': fx.fade_edges(y.astype(np.float32)), 'words': [], 'style': style,
                 'voice': voice, 'gap': moves['gap'], 'text': item['text']}
-
-    def _join_cloned(self, items, cfg):
-        """Give cloned voices whole runs of a paragraph at once.
-
-        Chatterbox reads each call as a fresh utterance, so sentence-by-sentence
-        sounds like separate takes stitched together. Consecutive sentences
-        with the same voice and direction are read in one call (up to a length
-        it handles well), which keeps the intonation flowing between them.
-        """
-        keys = ('voice', 'style', 'intensity', 'speed')
-        out = []
-        for item in items:
-            prev = out[-1] if out else None
-            voice = item.get('voice') or cfg['voice']
-            if (item['kind'] == 'speech' and prev and prev['kind'] == 'speech'
-                    and voice.startswith(CLONE_PREFIX) and all(prev.get(k) == item.get(k) for k in keys)
-                    and len(prev['plain']) + len(item['plain']) < CLONE_JOIN_CHARS):
-                out[-1] = {**prev, 'text': f"{prev['text']} {item['text']}", 'speak': f"{prev['speak']} {item['speak']}",
-                           'plain': f"{prev['plain']} {item['plain']}"}
-                continue
-            out.append(dict(item))
-        return out
 
     def _render_pass(self, items, cfg, speed_scale):
         timeline, last = [], None
@@ -354,7 +359,6 @@ class Engine:
             raise ValueError('The script has no speakable text.')
         if len(items) > MAX_ITEMS:
             raise ValueError('The script is too long for one take. Split it into parts.')
-        items = self._join_cloned(items, cfg)
         timeline = self._render_pass(items, cfg, 1.0)
         info = {'passes': 1}
         target = cfg['target_seconds']
@@ -437,7 +441,48 @@ class Engine:
         return meta
 
 
-CLONE_JOIN_CHARS = 300
+CLONE_CHUNK_CHARS = 130
+CLONE_TRIES = 3
+CLONE_CHARS_PER_S = 15.0  # typical Chatterbox reading rate at normal pace
+
+
+def _clause_chunks(text, limit=CLONE_CHUNK_CHARS):
+    """Split text into pieces of at most ~limit characters at clause breaks."""
+    text = ' '.join(text.split())
+    if len(text) <= limit:
+        return [text] if text else []
+    clauses = [c for c in re.split(r'(?<=[,;:—–.!?])\s+', text) if c]
+    out = []
+    for c in clauses:
+        while len(c) > limit * 1.4:  # one huge clause: break at a word near the limit
+            cut = c.rfind(' ', 0, limit)
+            cut = cut if cut > limit // 3 else limit
+            out.append(c[:cut].strip())
+            c = c[cut:].strip()
+        if out and len(out[-1]) + 1 + len(c) <= limit:
+            out[-1] = f'{out[-1]} {c}'
+        else:
+            out.append(c)
+    # A tiny tail ("Amen.") reads oddly alone: hang it on the piece before.
+    if len(out) > 1 and len(out[-1]) < 25:
+        out[-2] = f'{out[-2]} {out.pop()}'
+    return out
+
+
+def _clone_fits(y, text, pace=1.0):
+    """(looks complete, how far off) for a cloned take of `text`.
+
+    Too short means Chatterbox ended early and skipped words; far too long
+    usually means it repeated itself or babbled.
+    """
+    chars = len(re.sub(r'\s+', ' ', text).strip())
+    expected = chars / (CLONE_CHARS_PER_S * max(0.5, pace))
+    got = len(y) / SR
+    if chars < 20:
+        return got > 0.15, 0.0
+    ratio = got / max(0.3, expected)
+    ok = 0.6 <= ratio <= 1.7 + 1.5 / max(1.0, expected)
+    return ok, abs(np.log(max(ratio, 1e-3)))
 
 
 def _gap_after(seg, cfg):
