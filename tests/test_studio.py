@@ -488,7 +488,7 @@ def test_clone_worker_waits_for_background_setup(tmp_path):
     try:
         lock.write_text(str(setup.pid))
         assert not w.available() and w.status()['setup'] == 'installing'
-        with pytest.raises(RuntimeError, match='still being installed'):
+        with pytest.raises(RuntimeError, match='finishes installing'):
             w.speak('hi', tmp_path / 'x.wav')
     finally:
         setup.kill(); setup.wait()
@@ -549,3 +549,40 @@ def test_every_ffmpeg_call_is_detached_from_the_terminal():
                     and getattr(node.func.value, 'id', '') == 'subprocess':
                 kw = {k.arg for k in node.keywords}
                 assert kw & {'stdin', 'input'}, f'{f.name}:{node.lineno} has no stdin='
+
+
+def test_setup_progress_is_read_from_the_log(tmp_path):
+    import subprocess
+    (tmp_path / 'data' / 'logs').mkdir(parents=True)
+    log = tmp_path / 'data' / 'logs' / 'setup-cloning.log'
+    log.write_text('=== Voice cloning setup, old run ===\nVoice cloning setup FAILED\n'
+                   '=== Voice cloning setup, Sat ===\nCreating the voice-cloning environment\n'
+                   'Installing Chatterbox (large download: PyTorch + model code)...\n'
+                   'warning: The `UV_NATIVE_TLS` environment variable is deprecated\n'
+                   'Downloading torch (731.2MiB)\nDownloading triton (241.4MiB)\nDownloading numpy (17.4MiB)\n'
+                   ' Downloaded numpy\n Downloaded triton\n')
+    w = CloneWorker(root=tmp_path)
+    p = w.setup_progress()
+    assert p['stage'].startswith('Downloading and installing PyTorch') and p['packages'] == [2, 3]
+    assert p['detail'] == 'Downloaded triton' and p['idle'] < 60  # this run only, not the old FAILED one
+    log.write_text(log.read_text() + 'Downloading the Chatterbox model (about 3 GB)\n   t3_cfg.safetensors\r'
+                   't3_cfg.safetensors:  12%|#  | 250M/2.13G\rt3_cfg.safetensors:  45%|#### | 960M/2.13G')
+    p = w.setup_progress()
+    assert p['stage'].startswith('Downloading the voice model') and '45%' in p['detail']
+    # A render while it installs is a clear 409 message, not a crash with a traceback.
+    (tmp_path / '.venv-chatterbox' / 'bin').mkdir(parents=True)
+    (tmp_path / '.venv-chatterbox' / 'bin' / 'python').write_text('')
+    (tmp_path / 'cloning').mkdir()
+    (tmp_path / 'cloning' / 'chatterbox_worker.py').write_text('')
+    setup = subprocess.Popen(['bash', '-c', 'sleep 30', 'setup-cloning.sh'])
+    try:
+        (tmp_path / '.venv-chatterbox.installing').write_text(str(setup.pid))
+        assert w.status()['progress']['stage'].startswith('Downloading the voice model')
+        from studio.cloning import CloningNotReady
+        with pytest.raises(CloningNotReady, match='voice model'):
+            w.speak('hi', tmp_path / 'x.wav')
+        import app as server
+        with server.app.app_context():
+            assert server._failure(CloningNotReady('installing'))[1] == 409
+    finally:
+        setup.kill(); setup.wait()

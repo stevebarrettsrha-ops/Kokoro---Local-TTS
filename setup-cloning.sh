@@ -53,10 +53,30 @@ uv pip install --python .venv-chatterbox/bin/python "chatterbox-tts==0.1.7"
 
 echo 'Downloading the Chatterbox model (about 3 GB; safe to rerun if interrupted)...'
 .venv-chatterbox/bin/python - <<'PY'
+import os, threading, time
 from huggingface_hub import hf_hub_download
+
+# The downloader draws no progress bar into a log file, so report the bytes on disk every 15 s.
+cache = os.path.join(os.environ["HF_HOME"], "hub", "models--ResembleAI--chatterbox", "blobs")  # real files (snapshots/ only links)
+def on_disk():
+    total = 0
+    for root, _, names in os.walk(cache):
+        for n in names:
+            try:
+                total += os.path.getsize(os.path.join(root, n))
+            except OSError:
+                pass
+    return total
+done = threading.Event()
+def report():
+    while not done.wait(15):
+        print(f"   downloaded {on_disk() / 1e9:.2f} GB of about 3.2 GB so far", flush=True)
+threading.Thread(target=report, daemon=True).start()
 for f in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
     print("  ", f, flush=True)
     hf_hub_download(repo_id="ResembleAI/chatterbox", filename=f)
+done.set()
+print(f"   downloaded {on_disk() / 1e9:.2f} GB: model complete", flush=True)
 import chatterbox  # noqa: F401  (fails here, not in the studio, if the install is broken)
 import torch
 print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none (CPU mode, slow)")

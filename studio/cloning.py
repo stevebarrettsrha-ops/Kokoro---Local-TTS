@@ -320,6 +320,21 @@ def prepare_reference(y):
 
 
 # ---------------------------------------------------------------- worker
+class CloningNotReady(RuntimeError):
+    """Cloned voices can't speak yet (engine installing or not installed): a state, not a crash."""
+
+
+SETUP_STAGES = [  # marker printed by setup-cloning.sh -> what the user is told
+    ('=== Voice cloning setup', 'Starting'),
+    ('Creating the voice-cloning environment', 'Preparing a Python environment'),
+    ('Installing Chatterbox', 'Downloading and installing PyTorch and Chatterbox (about 6 GB)'),
+    ('Downloading the Chatterbox model', 'Downloading the voice model (about 3 GB)'),
+    ('Voice cloning is ready', 'Ready'),
+    ('Voice cloning: ready', 'Ready'),
+    ('FAILED', 'Failed'),
+]
+
+
 class CloneWorker:
     """Runs cloning/chatterbox_worker.py inside the Chatterbox environment."""
 
@@ -351,6 +366,30 @@ class CloneWorker:
         except (ValueError, OSError):
             return 'interrupted'
 
+    def setup_progress(self):
+        """What the background setup is doing, read from its log: {stage, detail, packages, idle}."""
+        try:
+            with open(self.setup_log, 'rb') as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                text = f.read().decode('utf-8', 'replace')
+            idle = max(0, int(datetime.now().timestamp() - self.setup_log.stat().st_mtime))
+        except OSError:
+            return None
+        run = text[text.rfind('=== Voice cloning setup'):] if '=== Voice cloning setup' in text else text
+        lines = [ln.strip() for ln in re.split(r'[\r\n]+', run) if ln.strip()]
+        stage = None
+        for ln in lines:
+            for marker, label in SETUP_STAGES:
+                if marker in ln:
+                    stage = label
+        # uv lists each big package as "Downloading x (731MiB)" then " Downloaded x".
+        total = sum(1 for ln in lines if ln.startswith('Downloading ') and '(' in ln and not ln.startswith('Downloading the '))
+        done = sum(1 for ln in lines if ln.startswith('Downloaded '))
+        detail = next((ln for ln in reversed(lines) if not ln.startswith('warning:')), '')
+        return {'stage': stage, 'detail': detail[:160], 'idle': idle,
+                'packages': [done, total] if total else None}
+
     def available(self):
         return self.python.exists() and self.script.exists() and self.setup_state() is None
 
@@ -360,10 +399,16 @@ class CloneWorker:
         if not self.available():
             state = self.setup_state()
             if state == 'installing':
-                raise RuntimeError('Voice cloning is still being installed in the background (a large download). '
-                                   'Try again when it finishes; no restart is needed.')
-            raise RuntimeError('Voice cloning is not installed yet. Run ./start.sh while online (it installs it), '
-                               'or run ./setup-cloning.sh.')
+                prog = self.setup_progress() or {}
+                step = f' Now: {prog["stage"].lower()}.' if prog.get('stage') else ''
+                raise CloningNotReady('Cloned voices can speak once the cloning engine finishes installing in the '
+                                      f'background (a large download).{step} Progress is shown in "Your voices"; '
+                                      'no restart is needed.')
+            if state == 'interrupted':
+                raise CloningNotReady('Installing the cloning engine stopped part-way. It carries on the next time you '
+                                      'run ./start.sh while online (or run ./setup-cloning.sh); see data/logs/setup-cloning.log.')
+            raise CloningNotReady('Voice cloning is not installed yet. Run ./start.sh while online (it installs it), '
+                                  'or run ./setup-cloning.sh.')
         self.scratch.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
         self.proc = subprocess.Popen([str(self.python), str(self.script)], stdin=subprocess.PIPE,
@@ -415,8 +460,9 @@ class CloneWorker:
         return y
 
     def status(self):
+        state = self.setup_state()
         return {'installed': self.available(), 'running': bool(self.proc and self.proc.poll() is None),
-                'setup': self.setup_state()}
+                'setup': state, 'progress': self.setup_progress() if state else None}
 
     def close(self):
         if self.proc and self.proc.poll() is None:
