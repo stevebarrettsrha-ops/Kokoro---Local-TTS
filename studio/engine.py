@@ -16,6 +16,7 @@ import numpy as np
 import soundfile as sf
 
 from . import audio as fx
+from . import system
 from . import captions as cc
 from .cloning import CLONE_PREFIX, CloneWorker, VoiceLibrary
 from .phonemes import PACKS, make_resolver, with_pack
@@ -147,9 +148,11 @@ class Engine:
             import torch
             from kokoro import KModel
         except ImportError as err:
-            raise RuntimeError('Kokoro is not installed. Run ./start.sh to install the dependencies.') from err
-        force = os.environ.get('KOKORO_DEVICE', 'auto').lower()
+            raise RuntimeError(f'Kokoro is not installed. Run {system.start_command()} to install the dependencies.') from err
+        force = os.environ.get('KOKORO_DEVICE', 'auto').strip().lower() or 'auto'
         device = ('cuda' if torch.cuda.is_available() else 'cpu') if force == 'auto' else force
+        if device == 'mps':  # Apple GPU (opt-in): ops it lacks fall back to the CPU instead of failing
+            os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
         model = KModel(repo_id=REPO_ID).to(device).eval()
         self.patched = patch_model(model)
         self.model = model

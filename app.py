@@ -15,6 +15,7 @@ from flask import Flask, Request, abort, jsonify, request, send_file, send_from_
 from studio.cloning import CloningNotReady
 from studio.engine import Engine
 from studio.engine import bounded as engine_bounded
+from studio import system
 from studio import video as vid
 
 HERE = Path(__file__).resolve().parent
@@ -42,7 +43,8 @@ class StudioRequest(Request):
 def save_upload(upload, dst):
     """Put an uploaded file at dst: a hard link when possible (no copy, no extra disk), else a copy."""
     name = getattr(upload.stream, 'name', None)
-    if isinstance(name, str) and os.path.isfile(name):
+    # Not on Windows: there the temporary file is deleted when closed, and it is still open here.
+    if not system.WINDOWS and isinstance(name, str) and os.path.isfile(name):
         try:
             upload.stream.flush()
             os.link(name, dst)
@@ -63,6 +65,8 @@ def device_status():
         import torch
         if torch.cuda.is_available():
             return {'device': 'CUDA', 'gpu': torch.cuda.get_device_name(0), 'cuda': True}
+        if os.environ.get('KOKORO_DEVICE', '').strip().lower() == 'mps':
+            return {'device': 'Apple GPU (MPS)', 'gpu': 'Apple GPU', 'cuda': False}
         return {'device': 'CPU', 'gpu': None, 'cuda': False}
     except Exception:
         return {'device': 'CPU / unavailable', 'gpu': None, 'cuda': False}
@@ -151,7 +155,7 @@ def _failure(exc):
     if 'OfflineModeIsEnabled' in type(exc).__name__ or 'offline mode' in message.lower():
         message = 'A required model or voice is not cached. Run ./download-models.sh online first.'
     elif 'out of memory' in message.lower():
-        message = 'The GPU ran out of memory. Try KOKORO_DEVICE=cpu ./start.sh, or close GPU-heavy apps.'
+        message = f'The GPU ran out of memory. Try {system.env_example("KOKORO_DEVICE", "cpu")}, or close GPU-heavy apps.'
     return jsonify({'error': message[:600]}), 500
 
 
@@ -409,7 +413,8 @@ def _resolve_media(mid):
 @app.get('/api/video/status')
 def video_status():
     t = vid.tools()
-    return jsonify({'ffmpeg': bool(t['ffmpeg']), 'ffprobe': bool(t['ffprobe']), 'formats': vid.FORMATS})
+    return jsonify({'ffmpeg': bool(t['ffmpeg']), 'ffprobe': bool(t['ffprobe']), 'formats': vid.FORMATS,
+                    'ffmpeg_hint': system.ffmpeg_install_hint()})
 
 
 @app.get('/api/media')
@@ -597,7 +602,7 @@ def report_cloning_setup():
             elif pk:
                 line += f' — {pk[0]} of {pk[1]} large packages downloaded'
             if state != 'installing':
-                if last is None and time.time() - started < 15:  # start.sh launches it a moment earlier
+                if last is None and time.time() - started < 15:  # the launcher starts it a moment earlier
                     time.sleep(1)
                     continue
                 if last is not None:  # it was running while we watched
@@ -606,7 +611,7 @@ def report_cloning_setup():
                 return
             # A new step is shown at once; byte counts at most once a minute.
             if line != last and (stage != last_stage or time.time() - printed >= 60):
-                print(f'[voice cloning] {line}  (details: tail -f data/logs/setup-cloning.log)', flush=True)
+                print(f'[voice cloning] {line}  (details: data/logs/setup-cloning.log)', flush=True)
                 last, last_stage, printed = line, stage, time.time()
             time.sleep(5)
     threading.Thread(target=watch, daemon=True).start()
@@ -621,16 +626,27 @@ def recover():
         print(f'Restarting an interrupted video export ({jid[:8]}).', flush=True)
 
 
-if __name__ == '__main__':
+def port_answers(port):
+    """True if something already listens on the port. Needed on Windows, where binding with
+    SO_REUSEADDR (as werkzeug does) succeeds even while another program is serving the port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+
+def main():
     from werkzeug.serving import make_server
     port = int(os.environ.get('KOKORO_PORT', '8765'))
     # Bind first: if the studio is already running, say so and leave its files alone.
     try:
+        if port_answers(port):
+            raise OSError('in use')
         server = make_server('127.0.0.1', port, app, threaded=True)  # loopback only: never exposed to the LAN
-    except (OSError, SystemExit) as exc:  # werkzeug reports a busy port as SystemExit
+    except (OSError, SystemExit):  # werkzeug reports a busy port as SystemExit
         print(f'\nPort {port} is already in use.\n'
               f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
-              f'Or start it on another port: KOKORO_PORT={port + 1} ./start.sh\n', flush=True)
+              f'Or start it on another port: {system.env_example("KOKORO_PORT", port + 1)}\n', flush=True)
         raise SystemExit(1)
     recover()
     print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
@@ -639,3 +655,7 @@ if __name__ == '__main__':
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == '__main__':
+    main()

@@ -1277,7 +1277,7 @@ async function pollJob() {
     st.job = null; $('#veExCancel').hidden = true; $('#veExGo').disabled = false;
     $('#veExMsg').className = 'msg error';
     $('#veExMsg').textContent = gone ? 'That export is no longer known to the studio. Check Projects → exports, or export again.'
-      : 'Lost contact with the studio. Start it with ./start.sh; an unfinished export will start again by itself.';
+      : `Lost contact with the studio. Start it with ${K.CMD.start}; an unfinished export will start again by itself.`;
     return;
   }
   const pct = Math.round(job.progress * 100);
@@ -1304,7 +1304,7 @@ function init() {
   if (!booting) booting = (async () => {
     try {
       const status = await api('/api/video/status');
-      if (!status.ffmpeg) K.toast('Install ffmpeg to use the video editor: sudo apt install ffmpeg');
+      if (!status.ffmpeg) K.toast('Install ffmpeg to use the video editor: ' + (status.ffmpeg_hint || 'see the README'));
       renderPresets();
       await loadLibrary();
       let last = store.get('ve-last', null);

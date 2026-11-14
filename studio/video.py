@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import system
+
 ID_RE = re.compile(r'[0-9a-f]{32}')
 COLOR_RE = re.compile(r'#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?')
 IMAGE_EXT = {'png', 'jpg', 'jpeg', 'webp', 'bmp'}
@@ -81,7 +83,7 @@ def probe(path):
     """Duration, size and streams of a media file (ffprobe)."""
     exe = tools()['ffprobe']
     if not exe:
-        raise RuntimeError('ffprobe (part of ffmpeg) is required for the video editor: sudo apt install ffmpeg')
+        raise RuntimeError('ffprobe (part of ffmpeg) is required for the video editor: ' + system.ffmpeg_install_hint())
     proc = subprocess.run([exe, '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', str(path)],
                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:
@@ -714,7 +716,7 @@ class ExportJobs:
     def start(self, project, resolve, text_images, *, lufs=None, quality='high'):
         exe = tools()['ffmpeg']
         if not exe:
-            raise RuntimeError('ffmpeg is required to export video: sudo apt install ffmpeg')
+            raise RuntimeError('ffmpeg is required to export video: ' + system.ffmpeg_install_hint())
         if not project['clips']:
             raise ValueError('The timeline is empty. Add some media first.')
         job_id = uuid.uuid4().hex
@@ -814,7 +816,7 @@ class ExportJobs:
         for i, job in enumerate(pending):
             try:
                 if not tools()['ffmpeg']:
-                    raise RuntimeError('ffmpeg is required to export video: sudo apt install ffmpeg')
+                    raise RuntimeError('ffmpeg is required to export video: ' + system.ffmpeg_install_hint())
                 if i:  # only one export runs at a time
                     raise RuntimeError('Interrupted when the studio stopped. Export again.')
                 # An export that keeps getting interrupted may be what stops the computer: give up after two tries.
