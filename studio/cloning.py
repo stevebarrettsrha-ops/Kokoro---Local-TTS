@@ -2,7 +2,7 @@
 
 Chatterbox pins its own torch/transformers versions, which clash with
 Kokoro's, so it runs in a separate virtual environment (.venv-chatterbox,
-created by ./setup-cloning.sh). This module talks to it over a pipe: one JSON
+created by setup-cloning, bootstrap/cloning_setup.py). This module talks to it over a pipe: one JSON
 request per line in, one JSON reply per line out. The model stays loaded
 between requests.
 """
@@ -23,6 +23,7 @@ import numpy as np
 import soundfile as sf
 
 from . import audio as fx
+from . import system
 
 SR = fx.MODEL_RATE
 MIN_SECONDS = 6.0
@@ -324,7 +325,7 @@ class CloningNotReady(RuntimeError):
     """Cloned voices can't speak yet (engine installing or not installed): a state, not a crash."""
 
 
-SETUP_STAGES = [  # marker printed by setup-cloning.sh -> what the user is told
+SETUP_STAGES = [  # marker printed by bootstrap/cloning_setup.py -> what the user is told
     ('=== Voice cloning setup', 'Starting'),
     ('Creating the voice-cloning environment', 'Preparing a Python environment'),
     ('Installing Chatterbox', 'Downloading and installing PyTorch and Chatterbox (about 6 GB)'),
@@ -341,9 +342,10 @@ class CloneWorker:
     def __init__(self, python=None, script=None, root=None):
         root = Path(root or Path(__file__).resolve().parents[1])
         custom = python or os.environ.get('CHATTERBOX_PYTHON')
-        self.python = Path(custom or root / '.venv-chatterbox' / 'bin' / 'python')
-        # setup-cloning.sh holds this file (with its process id) while it installs.
+        self.python = Path(custom or system.venv_python(root / '.venv-chatterbox'))
+        # bootstrap/cloning_setup.py holds an OS lock on this file (which has its process id) while it installs.
         self.setup_lock = None if custom else root / '.venv-chatterbox.installing'
+        self.ready_mark = root / '.venv-chatterbox' / '.ready'
         self.setup_log = root / 'data' / 'logs' / 'setup-cloning.log'
         self.script = Path(script or root / 'cloning' / 'chatterbox_worker.py')
         self.proc = None
@@ -353,18 +355,24 @@ class CloneWorker:
     def setup_state(self):
         """'installing', 'interrupted' (setup stopped part-way) or None.
 
-        The lock holds the setup's process id. That id only counts if it still is setup-cloning.sh:
-        after a reboot the id may belong to another program, and a finished setup that nobody
-        collected (a zombie) still answers kill(0) but has an empty command line.
+        The setup holds an OS lock on the lock file for as long as it runs, so a crash, Ctrl+C or a
+        reboot can never leave it looking busy, and a reused process id can't fool the check.
         """
         if not self.setup_lock or not self.setup_lock.exists():
             return None
+        if system.lock_is_held(self.setup_lock):
+            return 'installing'
+        if self.ready_mark.exists():  # finished a moment ago and is just removing its lock file
+            return None
+        return 'installing' if self._legacy_setup_running() else 'interrupted'
+
+    def _legacy_setup_running(self):
+        """A setup started by an older bash setup-cloning.sh (no OS lock): check its process id."""
         try:
             pid = int(self.setup_lock.read_text().strip())
-            cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()
-            return 'installing' if b'setup-cloning' in cmdline else 'interrupted'
+            return b'setup-cloning' in Path(f'/proc/{pid}/cmdline').read_bytes()
         except (ValueError, OSError):
-            return 'interrupted'
+            return False
 
     def setup_progress(self):
         """What the background setup is doing, read from its log: {stage, detail, packages, idle}."""
@@ -406,9 +414,10 @@ class CloneWorker:
                                       'no restart is needed.')
             if state == 'interrupted':
                 raise CloningNotReady('Installing the cloning engine stopped part-way. It carries on the next time you '
-                                      'run ./start.sh while online (or run ./setup-cloning.sh); see data/logs/setup-cloning.log.')
-            raise CloningNotReady('Voice cloning is not installed yet. Run ./start.sh while online (it installs it), '
-                                  'or run ./setup-cloning.sh.')
+                                      f'run {system.start_command()} while online (or run {system.setup_cloning_command()}); '
+                                      'see data/logs/setup-cloning.log.')
+            raise CloningNotReady(f'Voice cloning is not installed yet. Run {system.start_command()} while online (it installs it), '
+                                  f'or run {system.setup_cloning_command()}.')
         self.scratch.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
         self.proc = subprocess.Popen([str(self.python), str(self.script)], stdin=subprocess.PIPE,

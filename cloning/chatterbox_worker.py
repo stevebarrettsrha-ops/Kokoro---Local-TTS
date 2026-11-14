@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chatterbox worker. Runs inside .venv-chatterbox (see ../setup-cloning.sh).
+"""Chatterbox worker. Runs inside .venv-chatterbox (see ../bootstrap/cloning_setup.py).
 
 Protocol: one JSON object per line on stdin, one JSON reply per line on
 stdout. All library logging goes to stderr so it can't corrupt the replies.
@@ -30,10 +30,11 @@ def load():
         if perth.PerthImplicitWatermarker is None:
             # resemble-perth hides its import error and Chatterbox then calls None().
             raise RuntimeError('The cloning engine is missing a package (setuptools). Fix: stop the studio, run '
-                               './setup-cloning.sh (or: uv pip install --python .venv-chatterbox/bin/python '
-                               '"setuptools<81"), then start it again.')
+                               'setup-cloning (./setup-cloning.sh, or setup-cloning.bat on Windows), then start it again.')
         from chatterbox.tts import ChatterboxTTS
-        device = os.environ.get('CHATTERBOX_DEVICE') or ('cuda' if torch.cuda.is_available() else 'cpu')
+        device = (os.environ.get('CHATTERBOX_DEVICE') or '').strip().lower() or ('cuda' if torch.cuda.is_available() else 'cpu')
+        if device == 'mps':  # Apple GPU (opt-in): ops it lacks fall back to the CPU
+            os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
         print(f'[cloning] loading Chatterbox on {device}…', flush=True)
         MODEL = ChatterboxTTS.from_pretrained(device=device)
         print('[cloning] ready', flush=True)

@@ -33,43 +33,68 @@ This replaces the old approach of pitch-shifting finished audio, which smeared t
 - Light voice polish.
 - Captions are timed from Kokoro's own word timings.
 
-## Quick start (Ubuntu / Linux Mint / Debian)
+## Quick start
+
+Kokoro Studio runs on **Linux**, **macOS** and **Windows 10/11**. The first start needs an internet connection; after that it also works offline.
+
+### Linux (Ubuntu / Linux Mint / Debian and others)
 
 1. Clone or extract this folder and open a terminal in it.
-2. Start the studio, while online:
-
-   ```bash
-   ./start.sh
-   ```
-
+2. Run `./start.sh`.
 3. Your browser opens `http://127.0.0.1:8765`. Stop with Ctrl+C.
+
+### macOS (Apple silicon or Intel)
+
+1. Clone or extract this folder.
+2. Double-click **`start.command`**, or open Terminal in the folder and run `./start.sh`. If macOS says the file can't be opened because it is from the internet, right-click it and choose **Open**, or run `bash start.sh` in Terminal.
+3. Your browser opens `http://127.0.0.1:8765`. Stop with Ctrl+C in the Terminal window.
+
+ffmpeg is installed with [Homebrew](https://brew.sh) if you have it (`brew install ffmpeg`). Apple-silicon Macs are recommended: current PyTorch no longer supports Intel Macs, so an Intel Mac may end up with an older version.
+
+### Windows 10 / 11
+
+1. Download the folder (on GitHub: **Code → Download ZIP**, then right-click the zip → **Extract All**). Don't run it from inside the zip.
+2. Double-click **`start.bat`**. If Windows SmartScreen warns about it, click **More info → Run anyway**.
+3. Your browser opens `http://127.0.0.1:8765`. Stop by closing the window or pressing Ctrl+C in it.
+
+ffmpeg is installed with `winget` (built into Windows 10/11) if you say yes. To give a setting, open a Command Prompt in the folder and run for example `set "KOKORO_PORT=8899" && start.bat`.
+
+### What the first start does
 
 The first run downloads everything, so nothing has to download later. It asks before installing anything on the system itself:
 
-- **System programs:** `ffmpeg` (Video tab, MP3 export, recordings), plus `curl` if neither curl nor wget is there to fetch uv. It installs them with `sudo apt` if you say yes; if you say no, it doesn't ask again. (Kokoro brings its own espeak-ng.)
-- **uv:** fetches Python 3.12 for the studio without touching the system Python (Kokoro 0.9.4 needs Python 3.10–3.12; Ubuntu 26.04 ships 3.14). It's installed into `~/.local/bin` if you say yes; its installer also adds that folder to your shell's PATH.
+- **System programs:** `ffmpeg` (Video tab, MP3 export, recordings). Linux installs it with `sudo apt`, macOS with `brew`, Windows with `winget`, if you say yes; if you say no, it doesn't ask again. (Kokoro brings its own espeak-ng on every system.)
+- **uv:** fetches Python 3.12 for the studio without touching the system Python (Kokoro 0.9.4 needs Python 3.10–3.12; Ubuntu 26.04 and recent Homebrew ship 3.14). It's installed into your user folder (`~/.local/bin`, or `%USERPROFILE%\.local\bin` on Windows) if you say yes.
 - **Python packages, the spaCy English model, the Kokoro model and all 28 voices:** about 2.5 GB, into this folder.
-- **Voice cloning (Chatterbox):** about 9 GB more (it's skipped if less than 12 GB is free). This installs **in the background** while you already use the studio; progress goes to `data/logs/setup-cloning.log`. Cloned voices start working when it finishes, with no restart. It keeps going if you stop the studio or close the terminal; to stop it, run `kill -- -$(cat .venv-chatterbox.installing)`. To skip it, start with `SKIP_CLONING=1 ./start.sh`.
+- **Voice cloning (Chatterbox):** about 9 GB more (it's skipped if less than 12 GB is free). This installs **in the background** while you already use the studio; progress goes to `data/logs/setup-cloning.log` and is shown in the studio's window. Cloned voices start working when it finishes, with no restart. It keeps going if you stop the studio or close the window; the start-up message shows the command that stops it. To skip it, set `SKIP_CLONING=1`.
 
 Later starts only check that everything is still there, which takes a few seconds. If a download was interrupted, the next start carries on from where it stopped.
 
-To install the system programs yourself instead: `sudo apt install -y curl ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`. If you start the studio from a desktop shortcut (no terminal), it can't ask, so run `./start.sh` once in a terminal first.
+To install the system programs yourself instead:
 
-Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. The model and all voices download during the first `./start.sh`.
+- Linux: `sudo apt install -y curl ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- macOS: `brew install ffmpeg uv`
+- Windows (PowerShell): `winget install -e --id Gyan.FFmpeg` and `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+
+If you start the studio from a desktop shortcut with no terminal, it can't ask, so run it once in a terminal first.
+
+Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. A `.venv` belongs to one system: when moving the folder to another computer or OS, delete `.venv` and `.venv-chatterbox` and let the first start make them again.
 
 ### Offline use
 
-Run `./start.sh` once while online and let the background cloning setup finish (see `data/logs/setup-cloning.log`). After that, start with `OFFLINE=1 ./start.sh`.
+Start the studio once while online and let the background cloning setup finish (see `data/logs/setup-cloning.log`). After that, start with `OFFLINE=1 ./start.sh` (Windows: `set "OFFLINE=1" && start.bat`).
 
 ### GPU
 
-Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU; the top bar shows the device. If it shows CPU, install a CUDA build of PyTorch into `.venv`. Take the index URL from [pytorch.org](https://pytorch.org/get-started/locally/), for example:
+Kokoro uses CUDA automatically if PyTorch can see your NVIDIA GPU (Linux and Windows); the top bar shows the device. If it shows CPU, install a CUDA build of PyTorch into `.venv`. Take the index URL from [pytorch.org](https://pytorch.org/get-started/locally/), for example:
 
 ```bash
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
-(System `pip` won't work here: Ubuntu blocks it, and `.venv` may not have its own pip.) Force CPU with `KOKORO_DEVICE=cpu ./start.sh`. US and UK voices now share one model in memory.
+On Windows the environment's Python is `.venv\Scripts\python.exe` instead of `.venv/bin/python`. (System `pip` won't work here: Ubuntu blocks it, and `.venv` may not have its own pip.) Force CPU with `KOKORO_DEVICE=cpu ./start.sh`.
+
+On a Mac, Kokoro runs on the CPU, which is fast enough for an 82M model. You can try the Apple GPU with `KOKORO_DEVICE=mps ./start.sh` (and `CHATTERBOX_DEVICE=mps` for cloned voices); operations the GPU lacks fall back to the CPU. US and UK voices now share one model in memory.
 
 ## Video editor
 
@@ -96,7 +121,7 @@ creations/
   exports/    finished MP4s
 ```
 
-ffmpeg is required: `sudo apt install ffmpeg`.
+ffmpeg is required: `sudo apt install ffmpeg` (Linux), `brew install ffmpeg` (macOS) or `winget install -e --id Gyan.FFmpeg` (Windows); the first start offers to install it.
 
 ## Directing a script
 
@@ -146,7 +171,7 @@ Pick a second voice under *Blend with*.
 
 Built-in Kokoro voices can't be changed into a different person, so the studio can also make a voice from a recording of a real speaker. This uses [Chatterbox](https://github.com/resemble-ai/chatterbox) by Resemble AI (MIT licence), which runs locally. A clone captures the speaker's sound, accent and way of speaking.
 
-**Setup** happens by itself: the first `./start.sh` installs it in the background (see Quick start). You can also run `./setup-cloning.sh` yourself; it skips whatever is already done. It creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro, and downloads the model: about 6 GB of packages plus about 3 GB of model. An 8 GB NVIDIA GPU runs both engines. CPU works too, but slowly.
+**Setup** happens by itself: the first start installs it in the background (see Quick start). You can also run `./setup-cloning.sh` (Windows: `setup-cloning.bat`) yourself; it skips whatever is already done. It creates a separate environment, `.venv-chatterbox`, because Chatterbox needs different PyTorch versions from Kokoro, and downloads the model: about 6 GB of packages plus about 3 GB of model. An 8 GB NVIDIA GPU runs both engines. CPU works too (including on Macs and Windows PCs without an NVIDIA GPU), but slowly.
 
 **Adding a voice:** in the Voice panel, choose **Add a voice from a recording…**
 
@@ -189,10 +214,12 @@ Your current draft and theme are kept in this browser's local storage so a refre
 - `studio/phonemes.py`: sounds-like respelling, IPA clean-up, Hebrew name pack, *live* fix
 - `studio/audio.py`: loudness (ITU BS.1770), limiter, polish, room tone
 - `studio/captions.py`: SRT/VTT builder
-- `studio/cloning.py`, `cloning/chatterbox_worker.py`, `setup-cloning.sh`: cloned voices (Chatterbox in its own environment)
+- `studio/cloning.py`, `cloning/chatterbox_worker.py`, `bootstrap/cloning_setup.py`: cloned voices (Chatterbox in its own environment)
+- `studio/system.py`: the differences between Linux, macOS and Windows
+- `start.sh` (Linux, macOS), `start.command` (macOS double-click), `start.bat` + `start.ps1` (Windows): make the Python environment, then hand over to `bootstrap/launch.py`, which does the rest the same way on every system (spaCy and Kokoro models, background cloning setup, opening the browser)
 - `studio/video.py`: media library, video projects, transitions/animation plan, ffmpeg export
 - `static/`: the web UI (`video.js` and `video.css` hold the editor)
-- `tests/`: `uv pip install --python .venv/bin/python -r requirements-dev.txt && .venv/bin/python -m pytest -q`. The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
+- `tests/`: `uv pip install --python .venv/bin/python -r requirements-dev.txt && .venv/bin/python -m pytest -q` (Windows: `.venv\Scripts\python.exe`). The suite uses a fake voice, so it needs no model download. `test_prosody.py` runs Kokoro's real model code with random weights when Kokoro is installed.
 
 ## Limits
 
@@ -200,17 +227,19 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 
 ## Troubleshooting
 
-- **Updated to a new version and it wants to download everything again**: the new files probably landed in a different folder from your old install. From the new folder, run `./move-old-setup.sh /path/to/old/folder` to move your Python environment, downloaded models, takes, voices and videos across, then run `./start.sh`.
-- **`Permission denied` when running a script**: run `chmod +x *.sh` once, or start with `bash start.sh`.
+- **Updated to a new version and it wants to download everything again**: the new files probably landed in a different folder from your old install. On Linux or macOS, run `./move-old-setup.sh /path/to/old/folder` from the new folder to move your Python environment, downloaded models, takes, voices and videos across, then run `./start.sh`. On Windows, move the `.venv`, `.venv-chatterbox`, `data`, `outputs`, `voices` and `creations` folders across in File Explorer.
+- **`Permission denied` when running a script** (Linux, macOS): run `chmod +x *.sh start.command` once, or start with `bash start.sh`.
+- **Windows: "running scripts is disabled on this system"**: start with `start.bat` (it allows `start.ps1` for that one run), not by running `start.ps1` directly.
+- **Windows: ffmpeg still missing right after installing it**: close the window and run `start.bat` again, so it picks up the new PATH.
 - **Old `.venv-incompatible-*` folders**: backups made when an old Python environment was replaced. Once the studio runs, you can delete them to free several GB.
-- **Cloned voices fail with "no kernel image" or run out of GPU memory**: cloning pins its own older PyTorch, which may not support the newest GPUs. Run it on the CPU with `CHATTERBOX_DEVICE=cpu ./start.sh` (slower, but it works).
+- **Cloned voices fail with "no kernel image" or run out of GPU memory**: cloning pins its own older PyTorch, which may not support the newest GPUs. Run it on the CPU with `CHATTERBOX_DEVICE=cpu ./start.sh` (Windows: `set "CHATTERBOX_DEVICE=cpu" && start.bat`; slower, but it works).
 
-- **Engine not running**: start `./start.sh` and reload the page.
-- **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh`, then `./start.sh`.
-- **`Requires-Python >=3.10,<3.13`** or **"No supported Python interpreter"**: run `./start.sh` in a terminal and answer yes to installing uv, or install it yourself with `curl -LsSf https://astral.sh/uv/install.sh | sh`, then run `./start.sh` again.
+- **Engine not running**: start the studio (`./start.sh`, `start.command` or `start.bat`) and reload the page.
+- **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh` (Windows: `.venv\Scripts\python.exe -m bootstrap.spacy_model`), then start again.
+- **`Requires-Python >=3.10,<3.13`** or **"No supported Python interpreter"**: start the studio in a terminal and answer yes to installing uv (or install it yourself, see Quick start), then start it again.
 - **MP3 option greyed out**: install `ffmpeg`.
-- **Port in use**: `KOKORO_PORT=8899 ./start.sh`.
-- **Settings you can pass to `./start.sh`**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu` or `cuda`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning; `true`/`yes` work too), `CHATTERBOX_DEVICE` (`cpu` or `cuda`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else).
+- **Port in use**: `KOKORO_PORT=8899 ./start.sh` (Windows: `set "KOKORO_PORT=8899" && start.bat`).
+- **Settings you can give the launcher**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu`, `cuda` or `mps`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning; `true`/`yes` work too), `KOKORO_NO_BROWSER=1` (don't open the browser), `CHATTERBOX_DEVICE` (`cpu`, `cuda` or `mps`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else). On Linux and macOS put them before the command (`OFFLINE=1 ./start.sh`); on Windows use `set "OFFLINE=1" && start.bat`.
 
 ## Privacy
 

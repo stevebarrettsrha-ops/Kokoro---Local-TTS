@@ -6,6 +6,9 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+// How the studio is started on this computer (the browser runs on the same machine as the studio).
+const WINDOWS = /Windows/i.test(navigator.userAgent);
+const CMD = {start: WINDOWS ? 'start.bat' : './start.sh', setup: WINDOWS ? 'setup-cloning.bat' : './setup-cloning.sh'};
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
@@ -41,7 +44,7 @@ const state = {
 const api = async (url, opts) => {
   let r;
   try { r = await fetch(url, opts); }
-  catch { throw Error('Lost contact with the local engine. Check the terminal running ./start.sh.'); }
+  catch { throw Error(`Lost contact with the local engine. Check the window running ${CMD.start}.`); }
   if ((r.headers.get('content-type') || '').includes('audio/')) {
     if (!r.ok) throw Error(`Server error ${r.status}`);
     return r;
@@ -992,8 +995,8 @@ function renderCloneEngine() {
   const st = state.catalog?.cloning || {};
   const [led, text] = st.installed ? ['on', 'Cloning engine installed.']
     : st.setup === 'installing' ? ['busy', 'The cloning engine is being installed in the background (a large download). You can add voices now; they work as soon as it finishes, without a restart.' + setupProgress(st.progress)]
-    : st.setup === 'interrupted' ? ['err', 'Installing the cloning engine stopped part-way. It carries on the next time you run <span class="mono">./start.sh</span> while online (or run <span class="mono">./setup-cloning.sh</span>).']
-    : ['err', 'Cloning engine not installed yet. You can add voices now; to <b>use</b> them, run <span class="mono">./start.sh</span> while online (it installs it in the background), or <span class="mono">./setup-cloning.sh</span>.'];
+    : st.setup === 'interrupted' ? ['err', `Installing the cloning engine stopped part-way. It carries on the next time you run <span class="mono">${CMD.start}</span> while online (or run <span class="mono">${CMD.setup}</span>).`]
+    : ['err', `Cloning engine not installed yet. You can add voices now; to <b>use</b> them, run <span class="mono">${CMD.start}</span> while online (it installs it in the background), or <span class="mono">${CMD.setup}</span>.`];
   // One wrapper span: .engine-state is a flex row, so loose text and tags would become columns.
   $('#cloneEngine').innerHTML = `<span class="led ${led}"></span><span>${text}</span>`;
   pollSetup();
@@ -1046,7 +1049,7 @@ $('#cloneForm').addEventListener('submit', async e => {
     cut.src = null; cut.audio = null; $('#cutter').hidden = true; $('#cloneMedia').value = '';
     m.className = 'msg ok';
     m.textContent = `${j.voice.name} is ready and selected.` + (j.cloning.installed ? ' Use "Hear this emotion" to try it.'
-      : j.cloning.setup === 'installing' ? ' It can speak once the cloning engine finishes installing.' : ' Run ./start.sh online (or ./setup-cloning.sh) to start using it.');
+      : j.cloning.setup === 'installing' ? ' It can speak once the cloning engine finishes installing.' : ` Run ${CMD.start} online (or ${CMD.setup}) to start using it.`);
   } catch (err) { m.className = 'msg error'; m.textContent = err.message; }
   finally { cut.busy = false; $('#cloneSubmit').disabled = false; }
 });
@@ -1078,7 +1081,7 @@ async function init() {
     $('#led').classList.add('err');
     $('#engineText').textContent = 'Engine not running'; $('#led').title = 'Engine not running';
     $('#deviceText').textContent = '';
-    msg('Start the engine with ./start.sh, then reload this page.', 'error');
+    msg(`Start the engine with ${CMD.start}, then reload this page.`, 'error');
     state.catalog = {styles: Object.keys(COLORS).map(id => ({id, label: id[0].toUpperCase() + id.slice(1), speed: 1, pitch: 0, range: 1, gap: 0, energy: 0})), voices: [], presets: {}};
     state.catalog.styles.forEach(s => { state.styles[s.id] = s; });
     buildEmotionUI(); selectStyle('neutral');
@@ -1093,7 +1096,7 @@ async function init() {
 $('#toVideo').onclick = () => { if (state.take) window.KVideo?.addTake(state.take); };
 
 // Shared helpers for the video editor (static/video.js).
-window.KStudio = {api, toast, esc, show, COLORS, styles: () => state.styles, refreshCount, fmtShort};
+window.KStudio = {api, toast, esc, show, COLORS, CMD, styles: () => state.styles, refreshCount, fmtShort};
 
 init();
 })();

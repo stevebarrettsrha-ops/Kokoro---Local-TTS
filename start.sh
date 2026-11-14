@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Local Kokoro launcher. Kokoro 0.9.4 requires Python 3.10, 3.11 or 3.12.
+# Kokoro Studio launcher for Linux and macOS (Windows: start.bat).
+# Kokoro 0.9.4 requires Python 3.10, 3.11 or 3.12. This script makes the Python
+# environment (.venv); the rest of the setup is bootstrap/launch.py, shared with Windows.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export PATH="$HOME/.local/bin:$PATH"  # uv installed in the user binary directory
+case "$(uname -s)" in Darwin) MAC=1 ;; *) MAC=0 ;; esac
+if [ "$MAC" = 1 ]; then  # Homebrew's folder is not on PATH when started from Finder (start.command)
+  for brew_dir in /opt/homebrew/bin /usr/local/bin; do
+    [ -d "$brew_dir" ] && PATH="$brew_dir:$PATH"
+  done
+fi
 
 truthy() { case "${1:-}" in 1|true|yes|TRUE|YES|True|Yes) return 0 ;; *) return 1 ;; esac; }
 # OFFLINE=1 (or true/yes) uses only what is already downloaded.
@@ -29,9 +37,15 @@ if ! command -v uv >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1 && ! com
   missing+=(curl)
 fi
 declined=data/.declined-system-packages
+if [ "$MAC" = 1 ]; then installer='brew'; elif command -v apt-get >/dev/null 2>&1; then installer='apt'; else installer=''; fi
 if [ "${#missing[@]}" -gt 0 ]; then
-  if [ "$OFFLINE" != '1' ] && command -v apt-get >/dev/null 2>&1 && [ "$(cat "$declined" 2>/dev/null)" != "${missing[*]}" ]; then
-    if ask "Kokoro Studio needs ${missing[*]}. Install with sudo apt now?"; then
+  if [ "$OFFLINE" != '1' ] && [ -n "$installer" ] && [ "$(cat "$declined" 2>/dev/null)" != "${missing[*]}" ]; then
+    if [ "$installer" = brew ] && ! command -v brew >/dev/null 2>&1; then
+      echo "NOTICE: Kokoro Studio needs ${missing[*]}. Install Homebrew (https://brew.sh), then run: brew install ${missing[*]}" >&2
+    elif [ "$installer" = brew ] && ask "Kokoro Studio needs ${missing[*]}. Install with Homebrew now?"; then
+      brew install "${missing[@]}" ||
+        echo "WARNING: installing ${missing[*]} failed; continuing. Install it yourself with: brew install ${missing[*]}" >&2
+    elif [ "$installer" = apt ] && ask "Kokoro Studio needs ${missing[*]}. Install with sudo apt now?"; then
       # One broken software source (common with PPAs) must not stop the install.
       { sudo apt-get update || true; } && sudo apt-get install -y "${missing[@]}" ||
         echo "WARNING: installing ${missing[*]} failed; continuing. Install it yourself with: sudo apt install ${missing[*]}" >&2
@@ -41,11 +55,11 @@ if [ "${#missing[@]}" -gt 0 ]; then
   fi
   for tool in "${missing[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-      if command -v apt-get >/dev/null 2>&1; then
-        echo "NOTICE: missing ${missing[*]}. Install with: sudo apt install ${missing[*]}" >&2
-      else
-        echo "NOTICE: missing ${missing[*]}. Install it with your system's package manager." >&2
-      fi
+      case "$installer" in
+        brew) echo "NOTICE: missing ${missing[*]}. Install with: brew install ${missing[*]}" >&2 ;;
+        apt) echo "NOTICE: missing ${missing[*]}. Install with: sudo apt install ${missing[*]}" >&2 ;;
+        *) echo "NOTICE: missing ${missing[*]}. Install it with your system's package manager." >&2 ;;
+      esac
       break
     fi
   done
@@ -97,9 +111,9 @@ if [ ! -x .venv/bin/python ]; then
     if [ -z "$python_candidate" ]; then
       cat >&2 <<'HELP'
 ERROR: No supported Python interpreter found (Kokoro needs Python 3.10–3.12).
-Ubuntu 26.04 defaults to Python 3.14, which Kokoro 0.9.4 does not support.
+(Ubuntu 26.04 and recent Homebrew default to Python 3.14, which Kokoro 0.9.4 does not support.)
 
-Install uv (official installer) to manage Python 3.12 without changing Ubuntu:
+Install uv (official installer) to manage Python 3.12 without changing the system Python:
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
   uv python install 3.12
@@ -147,48 +161,6 @@ if ! have_packages || { [ "$OFFLINE" != '1' ] && [ "$(cat .venv/.requirements 2>
   echo "$req_hash" > .venv/.requirements
 fi
 
-# Verify the English G2P model before the server starts, not during the
-# first synthesis request (which otherwise fails with a browser NetworkError).
-bash ./repair-spacy.sh  # 'bash' so it runs even if the zip lost the executable bits
-
-if [ "$OFFLINE" = '1' ]; then
-  # Offline: just say so if the model was never downloaded (the first render would fail).
-  SKIP_SPACY_CHECK=1 bash ./download-models.sh --check ||
-    echo 'WARNING: the Kokoro model is not downloaded yet. Run ./start.sh once while online.' >&2
-else
-  # The Kokoro model and all voices (about 350 MB once; a quick check after that).
-  SKIP_SPACY_CHECK=1 bash ./download-models.sh || echo 'WARNING: the model download did not finish; it is retried on the next start.' >&2
-  # Cloned voices need ~9 GB more. That installs in the background so the studio can be
-  # used right away; cloned voices start working when it finishes, without a restart.
-  # An install made before the setuptools fix is marked ready but can't load the watermarker:
-  # clear the mark so the setup repairs it (a quick, small install).
-  if [ -f .venv-chatterbox/.ready ] && [ -z "${CHATTERBOX_PYTHON:-}" ] && \
-     ! .venv-chatterbox/bin/python -c 'import importlib.util as u, sys; sys.exit(0 if u.find_spec("pkg_resources") else 1)' >/dev/null 2>&1; then
-    rm -f .venv-chatterbox/.ready
-  fi
-  if ! truthy "${SKIP_CLONING:-0}" && [ -z "${CHATTERBOX_PYTHON:-}" ] && [ ! -f .venv-chatterbox/.ready ]; then
-    free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
-    if ! command -v uv >/dev/null 2>&1; then
-      echo 'NOTICE: voice cloning needs uv; install it and run ./setup-cloning.sh.' >&2
-    elif [ "${free_kb:-0}" -lt $((12 * 1024 * 1024)) ]; then
-      echo "NOTICE: voice cloning needs about 12 GB free disk space ($((free_kb / 1024 / 1024)) GB free); skipped for now." >&2
-    else
-      echo 'Setting up voice cloning in the background (large download). Progress: data/logs/setup-cloning.log'
-      echo '  It keeps going if you stop the studio. To stop it: kill -- -$(cat .venv-chatterbox.installing)'
-      # Own session: survives Ctrl+C and a closed terminal, and is not left as a zombie of the studio.
-      if command -v setsid >/dev/null 2>&1; then
-        setsid -f bash ./setup-cloning.sh >> data/logs/setup-cloning.log 2>&1 < /dev/null
-      else
-        ( nohup bash ./setup-cloning.sh >> data/logs/setup-cloning.log 2>&1 < /dev/null & )
-      fi
-    fi
-  fi
-fi
-
-echo "Python: $(.venv/bin/python --version 2>&1)"
-PORT="${KOKORO_PORT:-8765}"
-echo "Launching Kokoro Studio: http://127.0.0.1:${PORT}"
-if command -v xdg-open >/dev/null 2>&1; then
-  (sleep 3; xdg-open "http://127.0.0.1:${PORT}" >/dev/null 2>&1 || true) &
-fi
-exec .venv/bin/python app.py
+# The rest (spaCy model, Kokoro model and voices, the background voice-cloning install,
+# opening the browser, the studio itself) is shared with Windows.
+exec .venv/bin/python -m bootstrap.launch

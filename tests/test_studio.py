@@ -1,5 +1,6 @@
 """Tests that run without Kokoro weights. `pytest -q` from the project folder."""
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -520,29 +521,47 @@ def test_voice_cutter_routes_with_video_and_media(cloning_engine, monkeypatch, t
     assert c.post('/api/voices/sources', data={'media': 'f' * 32}).status_code == 400
 
 
-def test_clone_worker_waits_for_background_setup(tmp_path):
-    import os
+def _hold_setup_lock(lock):
+    """A stand-in for the running cloning setup: a process holding the OS lock on the lock file."""
     import subprocess
-    (tmp_path / '.venv-chatterbox' / 'bin').mkdir(parents=True)
-    (tmp_path / '.venv-chatterbox' / 'bin' / 'python').write_text('')
-    (tmp_path / 'cloning').mkdir()
-    (tmp_path / 'cloning' / 'chatterbox_worker.py').write_text('')
+    import sys
+    code = ('import sys, time; sys.path.insert(0, sys.argv[2]); from studio import system; '
+            'f = open(sys.argv[1], "a+b"); f.write(b"123"); f.flush(); assert system.try_lock(f); '
+            'print("locked", flush=True); time.sleep(60)')
+    proc = subprocess.Popen([sys.executable, '-c', code, str(lock), str(Path(__file__).resolve().parents[1])],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == 'locked'
+    return proc
+
+
+def _fake_chatterbox_env(root):
+    from studio import system
+    py = system.venv_python(root / '.venv-chatterbox')
+    py.parent.mkdir(parents=True, exist_ok=True)
+    py.write_text('')
+    (root / 'cloning').mkdir(exist_ok=True)
+    (root / 'cloning' / 'chatterbox_worker.py').write_text('')
+
+
+def test_clone_worker_waits_for_background_setup(tmp_path):
+    _fake_chatterbox_env(tmp_path)
     w = CloneWorker(root=tmp_path)
     assert w.available() and w.status()['setup'] is None
     lock = tmp_path / '.venv-chatterbox.installing'
-    setup = subprocess.Popen(['bash', '-c', 'sleep 30', 'setup-cloning.sh'])  # stands in for the running setup
+    setup = _hold_setup_lock(lock)
     try:
-        lock.write_text(str(setup.pid))
         assert not w.available() and w.status()['setup'] == 'installing'
         with pytest.raises(RuntimeError, match='finishes installing'):
             w.speak('hi', tmp_path / 'x.wav')
     finally:
         setup.kill(); setup.wait()
-    lock.write_text(str(os.getpid()))  # after a reboot the id belongs to some other program
-    assert not w.available() and w.status()['setup'] == 'interrupted'
-    proc = subprocess.Popen(['true']); proc.wait()
-    lock.write_text(str(proc.pid))  # setup stopped part-way
-    assert not w.available() and w.status()['setup'] == 'interrupted'
+    # The setup stopped part-way (crash, reboot, Ctrl+C): the OS dropped its lock, the file stays.
+    assert lock.exists() and not w.available() and w.status()['setup'] == 'interrupted'
+    lock.write_text(str(os.getpid()))  # an id that now belongs to some other program changes nothing
+    assert w.status()['setup'] == 'interrupted'
+    (tmp_path / '.venv-chatterbox' / '.ready').touch()  # finished; only removing its lock file is left
+    assert w.available()
+    (tmp_path / '.venv-chatterbox' / '.ready').unlink()
     lock.unlink()
     assert w.available()
 
@@ -616,13 +635,9 @@ def test_setup_progress_is_read_from_the_log(tmp_path):
     p = w.setup_progress()
     assert p['stage'].startswith('Downloading the voice model') and '45%' in p['detail']
     # A render while it installs is a clear 409 message, not a crash with a traceback.
-    (tmp_path / '.venv-chatterbox' / 'bin').mkdir(parents=True)
-    (tmp_path / '.venv-chatterbox' / 'bin' / 'python').write_text('')
-    (tmp_path / 'cloning').mkdir()
-    (tmp_path / 'cloning' / 'chatterbox_worker.py').write_text('')
-    setup = subprocess.Popen(['bash', '-c', 'sleep 30', 'setup-cloning.sh'])
+    _fake_chatterbox_env(tmp_path)
+    setup = _hold_setup_lock(tmp_path / '.venv-chatterbox.installing')
     try:
-        (tmp_path / '.venv-chatterbox.installing').write_text(str(setup.pid))
         assert w.status()['progress']['stage'].startswith('Downloading the voice model')
         from studio.cloning import CloningNotReady
         with pytest.raises(CloningNotReady, match='voice model'):
