@@ -5,6 +5,24 @@
 $ErrorActionPreference = 'Continue'
 Set-Location -LiteralPath $PSScriptRoot
 
+# Turn off QuickEdit for this window. With it on, a click inside the console window starts a text
+# selection that pauses the studio (setup and server) until a key is pressed, so the start looked
+# stuck or the page never loaded. Copying text still works from the window's menu (Edit > Mark).
+try {
+  Add-Type -Namespace KokoroStudio -Name ConsoleMode -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int handle);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr handle, uint mode);
+'@
+  $stdin = [KokoroStudio.ConsoleMode]::GetStdHandle(-10)
+  $mode = [uint32]0
+  if ([KokoroStudio.ConsoleMode]::GetConsoleMode($stdin, [ref]$mode)) {
+    # 0x40 = ENABLE_QUICK_EDIT_MODE (cleared), 0x80 = ENABLE_EXTENDED_FLAGS (needed to clear it)
+    if ($mode -band 0x40) { $mode -= 0x40 }
+    [void][KokoroStudio.ConsoleMode]::SetConsoleMode($stdin, [uint32]($mode -bor 0x80))
+  }
+} catch { }
+
 function Test-Truthy($v) { return @('1', 'true', 'yes', 'on') -contains "$v".Trim().ToLower() }
 function Test-Command($name) { return [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 function Update-PathFromSystem {

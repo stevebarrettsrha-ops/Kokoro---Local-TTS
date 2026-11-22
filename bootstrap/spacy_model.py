@@ -16,8 +16,21 @@ def loads(py):
                           capture_output=True, stdin=subprocess.DEVNULL).returncode == 0
 
 
+def installed_here():
+    """Quick check for this Python: the model package is installed and matches spaCy's major.minor.
+    Reads package metadata only. Importing spaCy also imports PyTorch, which made every start
+    wait several seconds (much longer on Windows) just to confirm the model is still there."""
+    try:
+        from importlib.metadata import version
+        spacy_branch = '.'.join(version('spacy').split('.')[:2])
+        model_branch = '.'.join(version('en_core_web_sm').split('.')[:2])
+    except Exception:  # noqa: BLE001 - not installed
+        return False
+    return spacy_branch == model_branch and spacy_branch in MODEL_FOR_SPACY
+
+
 def ensure(py=sys.executable):
-    if loads(py):
+    if (py == sys.executable and installed_here()) or loads(py):
         say('spaCy English model (en_core_web_sm): ready')
         return 0
     if offline():

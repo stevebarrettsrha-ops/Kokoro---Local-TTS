@@ -59,9 +59,8 @@ def open_browser(url):
     # On Linux without a desktop, webbrowser may pick a text browser that takes over this terminal.
     if not (system.WINDOWS or system.MAC) and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
         return
-    timer = threading.Timer(3, lambda: webbrowser.open(url))
-    timer.daemon = True
-    timer.start()
+    # A thread: webbrowser.open can take a moment, and the server is already listening by now.
+    threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
 
 def main():
@@ -88,9 +87,10 @@ def main():
     port = os.environ.get('KOKORO_PORT', '8765').strip() or '8765'
     os.environ['KOKORO_PORT'] = port
     say(f'Launching Kokoro Studio: http://127.0.0.1:{port}')
-    open_browser(f'http://127.0.0.1:{port}')
     import app
-    app.main()
+    # The browser opens once the server is listening. A fixed delay opened it too early on slower
+    # machines, which showed "can't connect" and looked as if the studio had not started.
+    app.main(on_ready=lambda: open_browser(f'http://127.0.0.1:{port}'))
     return 0
 
 

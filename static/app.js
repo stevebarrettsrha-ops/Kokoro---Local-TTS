@@ -1055,6 +1055,14 @@ $('#cloneForm').addEventListener('submit', async e => {
 });
 
 /* ---------- startup ---------- */
+// The engine checks for a GPU in the background at start-up (it loads PyTorch, which takes a while),
+// so the page doesn't wait for it: the device is filled in when it is known.
+function showDevice(status) {
+  if (!status.detecting) { $('#deviceText').textContent = status.cuda ? `${status.gpu}` : 'CPU'; return; }
+  $('#deviceText').textContent = 'Checking for a GPU…';
+  setTimeout(() => api('/api/status').then(showDevice).catch(() => { $('#deviceText').textContent = ''; }), 2000);
+}
+
 async function init() {
   try {
     const [status, cat] = await Promise.all([api('/api/status'), api('/api/voices')]);
@@ -1073,7 +1081,7 @@ async function init() {
     $('#led').classList.add('on');
     $('#engineText').textContent = status.loaded ? 'Engine ready' : 'Engine ready · model loads on first render';
     $('#led').title = $('#engineText').textContent;
-    $('#deviceText').textContent = status.cuda ? `${status.gpu}` : 'CPU';
+    showDevice(status);
     if (status.offline) toast('Offline mode: only voices already downloaded can be used.');
     refreshCount();
     msg('Ready.');
