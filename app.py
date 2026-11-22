@@ -60,7 +60,20 @@ app.json.sort_keys = False
 app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 ** 3  # video uploads can be large
 
 
+_device = {}  # filled by detect_device() in the background at start-up
+
+
+def detect_device():
+    """Importing PyTorch (and starting CUDA) takes from a few seconds to a minute. It runs in the
+    background at start-up so the page doesn't wait for it, and the first render starts sooner."""
+    _device.update(_device_status())
+
+
 def device_status():
+    return dict(_device) if _device else {'device': None, 'gpu': None, 'cuda': False, 'detecting': True}
+
+
+def _device_status():
     try:
         import torch
         if torch.cuda.is_available():
@@ -635,7 +648,8 @@ def port_answers(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def main():
+def main(on_ready=None):
+    import threading
     from werkzeug.serving import make_server
     port = int(os.environ.get('KOKORO_PORT', '8765'))
     # Bind first: if the studio is already running, say so and leave its files alone.
@@ -648,8 +662,11 @@ def main():
               f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
               f'Or start it on another port: {system.env_example("KOKORO_PORT", port + 1)}\n', flush=True)
         raise SystemExit(1)
+    threading.Thread(target=detect_device, daemon=True).start()
     recover()
     print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
+    if on_ready:  # the port is bound and listening: a browser connecting now is answered
+        on_ready()
     report_cloning_setup()
     try:
         server.serve_forever()
