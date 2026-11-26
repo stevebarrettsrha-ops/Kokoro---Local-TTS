@@ -648,16 +648,22 @@ def port_answers(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def running_studio_pid(port):
-    """The process id of a Kokoro Studio already serving this port, or None (something else, or unknown)."""
-    import subprocess
+def studio_on_port(port):
+    """The status of a Kokoro Studio already serving this port, or None if it is something else."""
     import urllib.request
     try:
         with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/status', timeout=3) as r:
             info = json.load(r)
     except Exception:
         return None
-    if not isinstance(info, dict) or info.get('model') != 'hexgrad/Kokoro-82M':
+    return info if isinstance(info, dict) and info.get('model') == 'hexgrad/Kokoro-82M' else None
+
+
+def running_studio_pid(port):
+    """The process id of a Kokoro Studio already serving this port, or None (something else, or unknown)."""
+    import subprocess
+    info = studio_on_port(port)
+    if info is None:
         return None
     if isinstance(info.get('pid'), int):
         return info['pid']
@@ -724,6 +730,20 @@ def main(on_ready=None):
     server = bind(port)
     if server is None and replace_running_studio(port):
         server = bind(port)
+    if server is None and not studio_on_port(port):
+        # Another program has the port: use the next free one instead of stopping.
+        wanted = port
+        for port in range(wanted + 1, min(wanted + 21, 65536)):
+            if studio_on_port(port):  # a studio that itself moved here earlier: don't start a second one
+                server = None
+                break
+            server = bind(port)
+            if server is not None:
+                print(f'\nPort {wanted} is used by another program, so the studio is on port {port} this time.', flush=True)
+                os.environ['KOKORO_PORT'] = str(port)
+                break
+        else:
+            port = wanted
     if server is None:
         print(f'\nPort {port} is already in use.\n'
               f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
@@ -733,7 +753,7 @@ def main(on_ready=None):
     recover()
     print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
     if on_ready:  # the port is bound and listening: a browser connecting now is answered
-        on_ready()
+        on_ready(port)
     report_cloning_setup()
     try:
         server.serve_forever()
