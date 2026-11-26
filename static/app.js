@@ -268,7 +268,7 @@ function renderPron() {
   $('#pronCount').textContent = state.pron.length ? `${state.pron.length} word${state.pron.length === 1 ? '' : 's'}` : 'applies to every take';
   $$('#pronList input').forEach(inp => inp.oninput = () => { state.pron[+inp.dataset.i][inp.dataset.k] = inp.value; changed(); });
   $$('#pronList [data-del]').forEach(b => b.onclick = () => { state.pron.splice(+b.dataset.del, 1); renderPron(); changed(); });
-  $$('#pronList [data-test]').forEach(b => b.onclick = () => testWord(state.pron[+b.dataset.test].word));
+  $$('#pronList [data-test]').forEach(b => b.onclick = () => testWord(state.pron[+b.dataset.test].word, b));
 }
 async function showPhonemes(text) {
   const out = $('#pronCheck');
@@ -278,11 +278,21 @@ async function showPhonemes(text) {
     out.hidden = false;
   } catch (err) { out.textContent = err.message; out.hidden = false; }
 }
-async function testWord(word) {
+async function testWord(word, btn) {
   word = String(word || '').trim();
   if (!word) { toast('Type the word first.'); return; }
-  await showPhonemes(word);
-  preview(word);
+  if (state.busy) { toast('Busy with another render or preview. Try again when it finishes.'); return; }
+  const cloned = String(payload('').voice || '').startsWith('clone:');
+  // The button shows it is working: a cloned voice can take a while, and longer the first time.
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  toast(cloned ? `Reading "${word}" with the cloned voice. This can take a while the first time.` : `Reading "${word}"…`);
+  try {
+    showPhonemes(word);  // not awaited: the sound must not wait for (or fail with) the phoneme check
+    // A cloned voice reads a lone word badly (cut short or garbled), so it gets a short sentence around it.
+    await preview(cloned ? `The word is ${word}.` : word);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▷'; }
+  }
 }
 $('#addPron').onclick = () => { state.pron.push({word: '', say: ''}); renderPron(); $$('#pronList .pron:last-child input')[0]?.focus(); };
 $('#addPack').onclick = () => {
@@ -624,9 +634,10 @@ function stopPreview() {
   if (!previewAudio) return;
   previewAudio.pause(); URL.revokeObjectURL(previewAudio.src); previewAudio = null;
 }
+// Resolves to true once the preview is playing; failures are shown in the status line and as a toast.
 async function preview(text) {
-  if (state.busy) return;
-  if (!text || !text.replace(TAG_RE, '').trim()) { toast('Put the cursor in a line (or select some text) to preview it.'); return; }
+  if (state.busy) { toast('Busy with another render or preview. Try again when it finishes.'); return false; }
+  if (!text || !text.replace(TAG_RE, '').trim()) { toast('Put the cursor in a line (or select some text) to preview it.'); return false; }
   setBusy(true, 'Preview…');
   try {
     const r = await api('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload(text))});
@@ -634,9 +645,12 @@ async function preview(text) {
     stopPreview();  // one preview at a time
     const a = previewAudio = new Audio(URL.createObjectURL(blob));
     a.onended = () => { if (previewAudio === a) stopPreview(); };
-    await a.play().catch(() => { if (previewAudio === a) stopPreview(); });
+    let played = true;
+    await a.play().catch(() => { played = false; if (previewAudio === a) stopPreview(); });
+    if (!played) { toast('The browser blocked the sound. Click the button again.'); return false; }
     msg('Preview: ' + text.replace(TAG_RE, '').trim().slice(0, 80));
-  } catch (err) { msg(err.message, 'error'); }
+    return true;
+  } catch (err) { msg(err.message, 'error'); toast(err.message); return false; }
   finally { setBusy(false); }
 }
 $('#renderBtn').onclick = render;
