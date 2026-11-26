@@ -238,7 +238,7 @@ Kokoro is not an acting model. The studio can make a read sadder, brighter, tens
 - **spaCy "No package installer found"**: stop the server and run `./repair-spacy.sh` (Windows: `.venv\Scripts\python.exe -m bootstrap.spacy_model`), then start again.
 - **`Requires-Python >=3.10,<3.13`** or **"No supported Python interpreter"**: start the studio in a terminal and answer yes to installing uv (or install it yourself, see Quick start), then start it again.
 - **MP3 option greyed out**: install `ffmpeg`.
-- **Port in use**: `KOKORO_PORT=8899 ./start.sh` (Windows: `set "KOKORO_PORT=8899" && start.bat`).
+- **Port in use**: if another program has the port, the studio uses the next free one and opens the browser there. If the studio itself is already running, the start offers to replace it. To choose a port: `KOKORO_PORT=8899 ./start.sh` (Windows: `set "KOKORO_PORT=8899" && start.bat`).
 - **Settings you can give the launcher**: `KOKORO_PORT` (default 8765), `KOKORO_DEVICE` (`cpu`, `cuda` or `mps`), `OFFLINE=1`, `SKIP_CLONING=1` (don't install voice cloning; `true`/`yes` work too), `KOKORO_NO_BROWSER=1` (don't open the browser), `CHATTERBOX_DEVICE` (`cpu`, `cuda` or `mps`, for cloned voices) and `CHATTERBOX_PYTHON` (use a Chatterbox environment somewhere else). On Linux and macOS put them before the command (`OFFLINE=1 ./start.sh`); on Windows use `set "OFFLINE=1" && start.bat`.
 
 ## Privacy

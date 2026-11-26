@@ -90,7 +90,7 @@ def main():
     import app
     # The browser opens once the server is listening. A fixed delay opened it too early on slower
     # machines, which showed "can't connect" and looked as if the studio had not started.
-    app.main(on_ready=lambda: open_browser(f'http://127.0.0.1:{port}'))
+    app.main(on_ready=lambda port: open_browser(f'http://127.0.0.1:{port}'))  # the port it really got
     return 0
 
 
