@@ -246,6 +246,10 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
 }
 .ex:hover { border-color: var(--ink); }
 .ex[aria-disabled="true"] { opacity: .35; pointer-events: none; }
+.preview-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--ink-2); }
+.preview-bar[hidden] { display: none; }
+.preview-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.preview-bar audio { height: 30px; flex: 0 0 300px; max-width: 60%; }
 .msg { grid-column: 1 / -1; font-size: 12px; color: var(--muted); min-height: 17px; padding-top: 2px; }
 .msg.ok { color: var(--ok); }
 .msg.error { color: var(--err); }
@@ -309,7 +313,8 @@ label.mini > .input, label.mini > .seg-toggle { margin-top: 4px; }
   .clock { min-width: 0; font-size: 12px; }
   .wave-wrap { grid-column: 1 / -1; grid-row: 2; margin-bottom: 18px; }
   .exports { grid-column: 1 / -1; grid-row: 3; }
-  .msg { grid-row: 4; }
+  .preview-bar { grid-row: 4; }
+  .msg { grid-row: 5; }
   .backdrop, #script { padding: 16px; font-size: 16px; }
   .emotion { grid-template-columns: 1fr; }
   .gauge { max-width: 220px; margin: 0 auto; }

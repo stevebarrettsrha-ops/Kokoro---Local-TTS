@@ -340,7 +340,7 @@ def test_cloned_voice_render_with_emotion_and_pronunciation(cloning_engine):
     srt = (e.out / f'{meta["id"]}.srt').read_text()
     assert 'Praise Yahuah, he is Qadash.' in srt  # captions keep the real spelling
     out = e.phonemize({'text': 'Praise Yahuah, he is Qadash.', 'voice': 'clone:marcus', 'pronunciations': rules})
-    assert out['sentences'][0]['phonemes'] == 'Praise yah-uh-ah, he is kah-dahsh.'
+    assert out['sentences'][0]['phonemes'] == 'Praise Yauah, he is Kahdahsh.'
 
 
 def test_cloned_voice_reads_long_sentences_in_pieces(cloning_engine):
@@ -353,7 +353,7 @@ def test_cloned_voice_reads_long_sentences_in_pieces(cloning_engine):
     e.synthesize({'text': f'{long}\n\nThe fear of "Yahuah" is the beginning (the start) of wisdom.',
                   'voice': 'clone:marcus', 'rate': 24000})
     assert sent[0] == long  # a normal sentence is read whole, so its intonation flows
-    assert sent[1] == 'The fear of yah-uh-ah is the beginning, the start, of wisdom.'  # no quotes or brackets
+    assert sent[1] == 'The fear of Yauah is the beginning, the start, of wisdom.'  # no quotes or brackets
 
 
 def test_cloned_voice_retries_a_take_that_stopped_early(cloning_engine):

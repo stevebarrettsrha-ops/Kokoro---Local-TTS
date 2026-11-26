@@ -125,7 +125,33 @@ def _plain_say(say, hint=''):
         say = str(hint or '').strip()
         if not say:
             return None
-    return say.lower() if '-' in say else say
+        return _one_word(say)  # also "YAH" -> "Yah": capitals would be spelled out letter by letter
+    return _one_word(say) if '-' in say else say
+
+
+_VOWEL_LETTERS = 'aeiou'
+
+
+def _one_word(say):
+    """'yeh-SHOO-ah' -> 'Yehshooah'. A text-reading engine says a hyphenated respelling as
+    separate words ("yeh, shoo, ah"), so the syllables are joined into one word. The 'h' that
+    only marks a vowel ("ah", "oh") is dropped before another vowel or h, where it would be
+    sounded or doubled ("el-oh-ah" -> "Eloah", not "Elohah"; "yah-HOO" -> "Yahoo")."""
+    out = []
+    for word in say.split():
+        sylls = [re.sub(r"[^a-z']", '', s.lower()) for s in word.split('-')]
+        sylls = [s for s in sylls if s]
+        joined = ''
+        for i, syl in enumerate(sylls):
+            nxt = sylls[i + 1] if i + 1 < len(sylls) else ''
+            if nxt[:1] in _VOWEL_LETTERS + 'h' and nxt and len(syl) > 1 and syl[-1] == 'h' and syl[-2] in _VOWEL_LETTERS:
+                syl = syl[:-1]
+            # The same vowel letter on both sides would run together ("voo" + "oht"): keep those apart.
+            sep = '-' if joined and joined[-1] in _VOWEL_LETTERS and syl[0] == joined[-1] else ''
+            joined += sep + syl
+        if joined:
+            out.append(joined.capitalize())
+    return ' '.join(out)
 
 
 def prepare_plain(sentence, rules=None):

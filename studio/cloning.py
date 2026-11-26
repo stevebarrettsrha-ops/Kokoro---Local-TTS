@@ -419,6 +419,7 @@ class CloneWorker:
             raise CloningNotReady(f'Voice cloning is not installed yet. Run {system.start_command()} while online (it installs it), '
                                   f'or run {system.setup_cloning_command()}.')
         self.scratch.mkdir(parents=True, exist_ok=True)
+        print('Starting the cloned-voice engine (the first read after a start takes a minute or more)...', flush=True)
         env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
         self.proc = subprocess.Popen([str(self.python), str(self.script)], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1, env=env)
