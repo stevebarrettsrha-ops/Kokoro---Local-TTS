@@ -66,7 +66,11 @@ _device = {}  # filled by detect_device() in the background at start-up
 def detect_device():
     """Importing PyTorch (and starting CUDA) takes from a few seconds to a minute. It runs in the
     background at start-up so the page doesn't wait for it, and the first render starts sooner."""
+    import time
+    began = time.monotonic()
+    print('Checking for a GPU (loads PyTorch; slower on the first start and from an external drive)...', flush=True)
     _device.update(_device_status())
+    print(f'Running on: {_device.get("gpu") or _device.get("device")}  ({time.monotonic() - began:.0f} s)', flush=True)
 
 
 def device_status():
@@ -122,6 +126,27 @@ def homepage():
 @app.get('/static/<path:name>')
 def static_file(name):
     return send_from_directory(str(STATIC), name)
+
+
+@app.get('/favicon.ico')
+def favicon():
+    return '', 204
+
+
+class QuietAccessLog:
+    """Keeps the terminal readable: page loads and the page's repeated progress checks are not
+    listed (they hid everything else). Renders, saves, deletes and all errors still are."""
+
+    def filter(self, record):
+        line = re.sub(r'\x1b\[[\d;]*m', '', record.getMessage())  # werkzeug colours some lines
+        m = re.search(r'"(\w+) \S+ HTTP/[\d.]+" (\d{3})', line)
+        return not (m and m.group(1) in ('GET', 'HEAD') and m.group(2)[0] in '23')
+
+
+def _spoken(payload):
+    """What a render is about to do, for the terminal."""
+    text = payload.get('text') if isinstance(payload.get('text'), str) else ''
+    return f'{len(text.split())} words, voice {payload.get("voice", "af_heart")}'
 
 
 @app.get('/api/status')
@@ -184,10 +209,15 @@ def generate():
     payload, error = _payload()
     if error:
         return error
+    import time
+    began = time.monotonic()
+    print(f'Rendering: {_spoken(payload)}...', flush=True)
     try:
         meta = engine.synthesize(payload, save=True)
     except Exception as exc:  # noqa: BLE001 - reported to the UI
+        print(f'Render failed: {str(exc)[:300]}', flush=True)
         return _failure(exc)
+    print(f'Rendered {meta["seconds"]:.1f} s of audio in {time.monotonic() - began:.0f} s.', flush=True)
     return jsonify({'ok': True, 'recording': _links(meta)})
 
 
@@ -213,10 +243,15 @@ def preview():
     if isinstance(text, str) and len(text) > 600:
         payload = {**payload, 'text': text[:600]}
     payload = {**payload, 'target_seconds': None, 'mp3': False, 'rate': 24000}
+    import time
+    began = time.monotonic()
+    print(f'Preview: {_spoken(payload)}...', flush=True)
     try:
         wav, info = engine.synthesize(payload, save=False)
     except Exception as exc:  # noqa: BLE001
+        print(f'Preview failed: {str(exc)[:300]}', flush=True)
         return _failure(exc)
+    print(f'Preview ready: {info["seconds"]:.1f} s of audio in {time.monotonic() - began:.0f} s.', flush=True)
     import io
     response = send_file(io.BytesIO(wav), mimetype='audio/wav')
     response.headers['X-Take-Info'] = json.dumps({k: info[k] for k in ('seconds', 'lufs', 'true_peak')})
@@ -749,9 +784,12 @@ def main(on_ready=None):
               f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
               f'Or start it on another port: {system.env_example("KOKORO_PORT", port + 1)}\n', flush=True)
         raise SystemExit(1)
+    import logging
+    logging.getLogger('werkzeug').addFilter(QuietAccessLog())
     threading.Thread(target=detect_device, daemon=True).start()
     recover()
-    print('\nKokoro Studio | http://127.0.0.1:%d\n' % port, flush=True)
+    print('\nKokoro Studio | http://127.0.0.1:%d\n'
+          'Keep this window open: what the studio is doing is shown here. Close it (or Ctrl+C) to stop.\n' % port, flush=True)
     if on_ready:  # the port is bound and listening: a browser connecting now is answered
         on_ready(port)
     report_cloning_setup()

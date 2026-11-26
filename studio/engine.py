@@ -7,6 +7,7 @@ import math
 import os
 import re
 import threading
+import time
 import uuid
 import zlib
 from datetime import datetime, timezone
@@ -153,7 +154,10 @@ class Engine:
         device = ('cuda' if torch.cuda.is_available() else 'cpu') if force == 'auto' else force
         if device == 'mps':  # Apple GPU (opt-in): ops it lacks fall back to the CPU instead of failing
             os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+        began = time.monotonic()
+        print(f'Loading the Kokoro model on {device} (first render only)...', flush=True)
         model = KModel(repo_id=REPO_ID).to(device).eval()
+        print(f'Kokoro model loaded ({time.monotonic() - began:.0f} s).', flush=True)
         self.patched = patch_model(model)
         self.model = model
         return model
