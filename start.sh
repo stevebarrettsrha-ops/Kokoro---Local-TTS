@@ -13,6 +13,40 @@ if [ "$MAC" = 1 ]; then  # Homebrew's folder is not on PATH when started from Fi
 fi
 
 truthy() { case "${1:-}" in 1|true|yes|TRUE|YES|True|Yes) return 0 ;; *) return 1 ;; esac; }
+
+# Started with no terminal (a desktop shortcut, or "Run" in the file manager): open a terminal
+# window and run there, so the start-up, downloads and model loading can be followed, the
+# first-run questions can be answered, and closing that window stops the studio.
+# KOKORO_NO_TERMINAL=1 keeps it in the background; its output then goes to data/logs/studio.log.
+if [ "$MAC" = 0 ] && [ ! -t 0 ] && [ ! -t 1 ] && [ -z "${KOKORO_IN_TERMINAL:-}" ] &&
+   ! truthy "${KOKORO_NO_TERMINAL:-0}" && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+  # Runs the studio, and on an error keeps the window open so the message can be read.
+  run=(env KOKORO_IN_TERMINAL=1 bash -c 'bash "$0"; s=$?; if [ "$s" -ne 0 ]; then echo;
+    read -r -p "Kokoro Studio stopped with an error (see above). Press Enter to close." _; fi; exit "$s"'
+    "$PWD/start.sh")
+  for term in "${TERMINAL:-}" x-terminal-emulator gnome-terminal ptyxis kgx konsole xfce4-terminal mate-terminal \
+              lxterminal qterminal terminator tilix alacritty kitty foot wezterm xterm; do
+    [ -n "$term" ] && command -v "$term" >/dev/null 2>&1 || continue
+    case "$(basename "$term")" in
+      gnome-terminal|ptyxis|kgx|tilix) args=(-- "${run[@]}") ;;
+      xfce4-terminal|mate-terminal|terminator) args=(-x "${run[@]}") ;;
+      lxterminal|qterminal) args=(-e "$(printf '%q ' "${run[@]}")") ;;  # these take one command string
+      wezterm) args=(start -- "${run[@]}") ;;
+      kitty|foot) args=("${run[@]}") ;;
+      *) args=(-e "${run[@]}") ;;  # x-terminal-emulator, konsole, alacritty, xterm
+    esac
+    # Some terminals return at once, others stay open with the studio: either way it worked,
+    # unless it failed straight away (then try the next one).
+    "$term" "${args[@]}" >/dev/null 2>&1 </dev/null &
+    sleep 1
+    if kill -0 "$!" 2>/dev/null || wait "$!"; then exit 0; fi
+  done
+fi
+if [ ! -t 1 ] && [ -z "${KOKORO_IN_TERMINAL:-}" ]; then  # no window to show it: keep it in a log instead
+  mkdir -p data/logs
+  exec >>data/logs/studio.log 2>&1
+  echo "---- $(date) ----"
+fi
 # OFFLINE=1 (or true/yes) uses only what is already downloaded.
 if truthy "${OFFLINE:-0}"; then OFFLINE=1; else OFFLINE=0; fi
 export OFFLINE
