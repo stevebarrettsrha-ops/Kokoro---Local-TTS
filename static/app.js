@@ -629,10 +629,14 @@ function lineAtCursor() {
   }
   return line;
 }
-let previewAudio = null;
-function stopPreview() {
-  if (!previewAudio) return;
-  previewAudio.pause(); URL.revokeObjectURL(previewAudio.src); previewAudio = null;
+// The last preview stays in a small player above the status line, so it can be played again
+// (and is still there if the browser refused to start the sound by itself).
+const previewAudio = $('#previewPlayer');
+function stopPreview() { previewAudio.pause(); }
+function dropPreview() {
+  previewAudio.pause();
+  if (previewAudio.src) { URL.revokeObjectURL(previewAudio.src); previewAudio.removeAttribute('src'); }
+  $('#previewBar').hidden = true;
 }
 // Resolves to true once the preview is playing; failures are shown in the status line and as a toast.
 async function preview(text) {
@@ -642,13 +646,24 @@ async function preview(text) {
   try {
     const r = await api('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload(text))});
     const blob = await r.blob();
-    stopPreview();  // one preview at a time
-    const a = previewAudio = new Audio(URL.createObjectURL(blob));
-    a.onended = () => { if (previewAudio === a) stopPreview(); };
+    let info = {};
+    try { info = JSON.parse(r.headers.get('X-Take-Info') || '{}'); } catch { /* the sound still plays */ }
+    dropPreview();  // one preview at a time
+    const said = text.replace(TAG_RE, '').trim().slice(0, 80);
+    previewAudio.src = URL.createObjectURL(blob);
+    $('#previewLabel').textContent = `Preview: ${said}` + (info.seconds ? ` (${(+info.seconds).toFixed(1)} s)` : '');
+    $('#previewBar').hidden = false;
+    if (info.seconds !== undefined && +info.seconds < 0.25) {
+      const m = 'The voice made almost no sound for this. Try again for another read.';
+      msg(m, 'error'); toast(m); return false;
+    }
     let played = true;
-    await a.play().catch(() => { played = false; if (previewAudio === a) stopPreview(); });
-    if (!played) { toast('The browser blocked the sound. Click the button again.'); return false; }
-    msg('Preview: ' + text.replace(TAG_RE, '').trim().slice(0, 80));
+    await previewAudio.play().catch(() => { played = false; });
+    if (!played) {
+      const m = 'The browser did not start the sound. Press play on the preview player at the bottom.';
+      msg(m, 'error'); toast(m); return false;
+    }
+    msg('Preview: ' + said);
     return true;
   } catch (err) { msg(err.message, 'error'); toast(err.message); return false; }
   finally { setBusy(false); }
