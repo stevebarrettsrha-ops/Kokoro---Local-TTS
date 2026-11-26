@@ -129,7 +129,7 @@ def status():
     return jsonify({'ok': True, **device_status(), 'loaded': engine.model is not None,
                     'in_model_prosody': engine.patched, 'offline': os.environ.get('HF_HUB_OFFLINE', '0') == '1',
                     'ffmpeg': bool(shutil.which('ffmpeg')), 'recordings': len(list(OUT.glob('*.json'))),
-                    'model': 'hexgrad/Kokoro-82M', 'server': 'local'})
+                    'model': 'hexgrad/Kokoro-82M', 'server': 'local', 'pid': os.getpid()})
 
 
 @app.get('/api/voices')
@@ -648,16 +648,83 @@ def port_answers(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def main(on_ready=None):
-    import threading
+def running_studio_pid(port):
+    """The process id of a Kokoro Studio already serving this port, or None (something else, or unknown)."""
+    import subprocess
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/status', timeout=3) as r:
+            info = json.load(r)
+    except Exception:
+        return None
+    if not isinstance(info, dict) or info.get('model') != 'hexgrad/Kokoro-82M':
+        return None
+    if isinstance(info.get('pid'), int):
+        return info['pid']
+    # A studio from before it reported its pid: ask the system who listens on the port.
+    for cmd in (['lsof', '-ti', f'tcp:{port}', '-sTCP:LISTEN'], ['fuser', f'{port}/tcp']):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=5).stdout.split()
+            if out and out[0].isdigit():
+                return int(out[0])
+        except Exception:
+            pass
+    try:
+        out = subprocess.run(['ss', '-ltnpH', f'sport = :{port}'], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=5).stdout
+        m = re.search(r'pid=(\d+)', out)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def replace_running_studio(port):
+    """A studio started earlier with no window can't be seen or closed. Offer to stop it and
+    start here instead. True once the port is free."""
+    import signal
+    import sys
+    import time
+    pid = running_studio_pid(port)
+    if not pid or pid == os.getpid() or not sys.stdin.isatty():
+        return False
+    print(f'\nKokoro Studio is already running on port {port} (process {pid}), perhaps without a window.')
+    try:
+        answer = input('Stop it and start it here instead? A render in progress would be lost. [Y/n] ')
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if answer.strip().lower().startswith('n'):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        print(f'Could not stop it: {exc}')
+        return False
+    for _ in range(40):
+        time.sleep(0.25)
+        if not port_answers(port):
+            return True
+    print('It did not stop in time.')
+    return False
+
+
+def bind(port):
     from werkzeug.serving import make_server
-    port = int(os.environ.get('KOKORO_PORT', '8765'))
-    # Bind first: if the studio is already running, say so and leave its files alone.
     try:
         if port_answers(port):
             raise OSError('in use')
-        server = make_server('127.0.0.1', port, app, threaded=True)  # loopback only: never exposed to the LAN
+        return make_server('127.0.0.1', port, app, threaded=True)  # loopback only: never exposed to the LAN
     except (OSError, SystemExit):  # werkzeug reports a busy port as SystemExit
+        return None
+
+
+def main(on_ready=None):
+    import threading
+    port = int(os.environ.get('KOKORO_PORT', '8765'))
+    # Bind first: if the studio is already running, say so and leave its files alone.
+    server = bind(port)
+    if server is None and replace_running_studio(port):
+        server = bind(port)
+    if server is None:
         print(f'\nPort {port} is already in use.\n'
               f'Kokoro Studio may already be running: open http://127.0.0.1:{port}\n'
               f'Or start it on another port: {system.env_example("KOKORO_PORT", port + 1)}\n', flush=True)
