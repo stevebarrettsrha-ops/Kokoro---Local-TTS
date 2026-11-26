@@ -76,7 +76,7 @@ To install the system programs yourself instead:
 - macOS: `brew install ffmpeg uv`
 - Windows (PowerShell): `winget install -e --id Gyan.FFmpeg` and `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
 
-If you start the studio from a desktop shortcut with no terminal, it can't ask, so run it once in a terminal first.
+On Linux, if you start `start.sh` from a desktop shortcut or the file manager, it opens a terminal window of its own, so you can follow the start-up and model loading and answer the first-run questions; closing that window stops the studio. To keep it in the background instead, set `KOKORO_NO_TERMINAL=1` (its messages then go to `data/logs/studio.log`).
 
 Python packages install into a folder-local `.venv`. If an existing `.venv` uses an unsupported Python, it is moved to a dated backup folder rather than deleted. A `.venv` belongs to one system: when moving the folder to another computer or OS, delete `.venv` and `.venv-chatterbox` and let the first start make them again.
 
